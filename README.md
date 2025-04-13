@@ -124,7 +124,6 @@ Access example video generation templates.
   - `index.ts`: Main entry point
   - `server.ts`: MCP server configuration
   - `config.ts`: Configuration handling
-  - `types/`: Type definitions
   - `tools/`: MCP tool implementations
   - `resources/`: MCP resource implementations
   - `services/`: External service integrations
