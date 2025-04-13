@@ -1,21 +1,38 @@
-import { GoogleGenerativeAI, GenerativeModel } from '@google/generative-ai';
+import { GoogleGenerativeAI, GenerativeModel, Part } from '@google/generative-ai';
 import fs from 'fs/promises';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import config from '../config.js';
-import { 
-  TextToVideoGenerationConfig, 
-  ImageToVideoGenerationConfig,
-  VideoGenerationResponse,
-  VideoGenerationError
-} from '../types/veo.js';
-import { StoredVideoMetadata } from '../types/mcp.js';
+// Define types for video generation
+interface VideoConfig {
+  aspectRatio?: '16:9' | '9:16';
+  personGeneration?: 'dont_allow' | 'allow_adult';
+  numberOfVideos?: 1 | 2;
+  durationSeconds?: number;
+  enhancePrompt?: boolean;
+  negativePrompt?: string;
+}
+
+// Metadata for stored videos
+interface StoredVideoMetadata {
+  id: string;
+  createdAt: string;
+  prompt?: string;
+  config: {
+    aspectRatio: '16:9' | '9:16';
+    personGeneration: 'dont_allow' | 'allow_adult';
+    durationSeconds: number;
+  };
+  mimeType: string;
+  size: number;
+}
 
 /**
  * Client for interacting with Google's Veo2 video generation API
  */
 export class VeoClient {
-  private model: GenerativeModel;
+  private genAI: GoogleGenerativeAI;
+  private model: string = 'veo-2.0-generate-001';
   private storageDir: string;
   
   /**
@@ -23,10 +40,7 @@ export class VeoClient {
    */
   constructor() {
     // Initialize the Google Generative AI client
-    const genAI = new GoogleGenerativeAI(config.GOOGLE_API_KEY);
-    
-    // Get the Veo2 model
-    this.model = genAI.getGenerativeModel({ model: 'veo-2.0-generate-001' });
+    this.genAI = new GoogleGenerativeAI(config.GOOGLE_API_KEY);
     
     // Set the storage directory
     this.storageDir = config.STORAGE_DIR;
@@ -50,6 +64,73 @@ export class VeoClient {
   }
   
   /**
+   * Wrapper method to generate a video
+   * 
+   * @param model The generative model
+   * @param params The video generation parameters
+   * @returns The video data
+   */
+  private async generateVideo(
+    model: GenerativeModel,
+    params: {
+      prompt: string;
+      image?: string;
+      aspectRatio?: string;
+      personGeneration?: string;
+      numberOfVideos?: number;
+      durationSeconds?: number;
+      enhancePrompt?: boolean;
+      negativePrompt?: string;
+    }
+  ): Promise<string> {
+    try {
+      // Create parts array for the request
+      const parts = [];
+      
+      // Add text prompt
+      parts.push({
+        text: params.prompt || 'Generate a video'
+      });
+      
+      // Add image if provided
+      if (params.image) {
+        parts.push({
+          inlineData: {
+            data: params.image,
+            mimeType: 'image/jpeg'
+          }
+        });
+      }
+      
+      // Call the generateContent method
+      const response = await model.generateContent(parts);
+    
+      // Extract the video data from the response
+      const result = await response.response;
+      
+      // Handle potential undefined values
+      if (!result.candidates || result.candidates.length === 0) {
+        throw new Error('No candidates returned from the model');
+      }
+      
+      const candidate = result.candidates[0];
+      if (!candidate.content || !candidate.content.parts || candidate.content.parts.length === 0) {
+        throw new Error('No content parts returned from the model');
+      }
+      
+      const text = candidate.content.parts[0].text;
+      if (!text) {
+        throw new Error('No text content returned from the model');
+      }
+      
+      return text;
+    } catch (error) {
+      console.error('Error generating video:', error);
+      throw error;
+    }
+  }
+  
+  /**
    * Generates a video from a text prompt
    * 
    * @param prompt The text prompt for video generation
@@ -58,7 +139,7 @@ export class VeoClient {
    */
   async generateFromText(
     prompt: string, 
-    config?: TextToVideoGenerationConfig
+    config?: VideoConfig
   ): Promise<StoredVideoMetadata> {
     try {
       // Prepare the request parameters
@@ -67,10 +148,16 @@ export class VeoClient {
         ...config
       };
       
-      // Generate the video
-      // Note: Using any type here as the Gemini API for video generation
-      // might not be fully typed in the current SDK version
-      const result = await (this.model as any).generateVideos(params);
+      // Generate the video using the Gemini API
+      const model = this.genAI.getGenerativeModel({ model: this.model });
+      const videoData = await this.generateVideo(model, params);
+      
+      // Create a result object
+      const result = {
+        response: {
+          videos: [videoData]
+        }
+      };
       
       // Save the video to disk
       return this.saveVideo(result, prompt, config);
@@ -91,20 +178,27 @@ export class VeoClient {
   async generateFromImage(
     image: string,
     prompt?: string,
-    config?: ImageToVideoGenerationConfig
+    config?: VideoConfig
   ): Promise<StoredVideoMetadata> {
     try {
       // Prepare the request parameters
+      // Ensure prompt is a string
       const params = {
         image,
-        prompt,
+        prompt: prompt || 'Generate a video from this image',
         ...config
       };
       
-      // Generate the video
-      // Note: Using any type here as the Gemini API for video generation
-      // might not be fully typed in the current SDK version
-      const result = await (this.model as any).generateVideos(params);
+      // Generate the video using the Gemini API
+      const model = this.genAI.getGenerativeModel({ model: this.model });
+      const videoData = await this.generateVideo(model, params);
+      
+      // Create a result object
+      const result = {
+        response: {
+          videos: [videoData]
+        }
+      };
       
       // Save the video to disk
       return this.saveVideo(result, prompt, config);
@@ -123,20 +217,15 @@ export class VeoClient {
    * @returns Metadata for the saved video
    */
   private async saveVideo(
-    result: any,
+    result: { response: { videos: string[] } },
     prompt?: string,
-    config?: TextToVideoGenerationConfig | ImageToVideoGenerationConfig
+    config?: VideoConfig
   ): Promise<StoredVideoMetadata> {
     // Generate a unique ID for the video
     const id = uuidv4();
     
-    // Get the video data from the response
-    // The exact structure depends on the Gemini API response format
-    // Assuming the response contains a video property or the first video in an array
-    const videoData = result.video || 
-                     (result.videos && result.videos[0]) || 
-                     (result.response && result.response.video) ||
-                     (result.response && result.response.videos && result.response.videos[0]);
+    // Get the video data from the response using the properly typed structure
+    const videoData = result.response.videos[0];
     
     if (!videoData) {
       throw new Error('No video data found in the response');
@@ -159,7 +248,7 @@ export class VeoClient {
       prompt,
       config: {
         aspectRatio: config?.aspectRatio || '16:9',
-        personGeneration: (config as TextToVideoGenerationConfig)?.personGeneration || 'dont_allow',
+        personGeneration: config?.personGeneration || 'dont_allow',
         durationSeconds: config?.durationSeconds || 5
       },
       mimeType,

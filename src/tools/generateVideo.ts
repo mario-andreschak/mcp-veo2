@@ -1,13 +1,33 @@
 import { z } from 'zod';
 import { veoClient } from '../services/veoClient.js';
-import { 
-  TextToVideoInputSchema, 
-  ImageToVideoInputSchema,
-  AspectRatioSchema,
-  PersonGenerationTextToVideoSchema,
-  PersonGenerationImageToVideoSchema
-} from '../types/mcp.js';
 import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+
+// Define schemas for tool inputs
+const AspectRatioSchema = z.enum(['16:9', '9:16']);
+const PersonGenerationSchema = z.enum(['dont_allow', 'allow_adult']);
+
+// Schema for text-to-video generation configuration
+const TextToVideoConfigSchema = z.object({
+  aspectRatio: AspectRatioSchema.optional(),
+  personGeneration: PersonGenerationSchema.optional(),
+  numberOfVideos: z.union([z.literal(1), z.literal(2)]).optional(),
+  durationSeconds: z.number().min(5).max(8).optional(),
+  enhancePrompt: z.boolean().optional(),
+  negativePrompt: z.string().optional(),
+});
+
+// Schema for text-to-video generation input
+const TextToVideoInputSchema = z.object({
+  prompt: z.string().min(1).max(1000),
+  config: TextToVideoConfigSchema.optional(),
+});
+
+// Schema for image-to-video generation input
+const ImageToVideoInputSchema = z.object({
+  prompt: z.string().min(1).max(1000).optional(),
+  image: z.string().min(1),
+  config: TextToVideoConfigSchema.optional(),
+});
 
 /**
  * Tool for generating a video from a text prompt

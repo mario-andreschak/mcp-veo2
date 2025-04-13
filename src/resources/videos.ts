@@ -1,7 +1,5 @@
 import { ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { UriTemplate } from '@modelcontextprotocol/sdk/shared/uriTemplate.js';
 import { veoClient } from '../services/veoClient.js';
-import { VideoResourceParams } from '../types/mcp.js';
 import { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
 
 /**
@@ -39,10 +37,10 @@ export async function readVideoResource(
   variables: Record<string, string | string[]>
 ): Promise<ReadResourceResult> {
   // The variables object should contain the 'id' from the URI template
-  const { id } = variables as unknown as VideoResourceParams;
+  const { id } = variables;
   
-  if (!id) {
-    throw new Error('Missing video ID in resource URI');
+  if (!id || typeof id !== 'string') {
+    throw new Error('Missing or invalid video ID in resource URI');
   }
   
   try {

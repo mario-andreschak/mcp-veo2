@@ -1,14 +1,11 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { z } from 'zod';
 import { videoResourceTemplate, readVideoResource, videoPromptsResource } from './resources/videos.js';
 import { 
   generateVideoFromText, 
   generateVideoFromImage, 
   listGeneratedVideos 
 } from './tools/generateVideo.js';
-import { 
-  TextToVideoInputSchema, 
-  ImageToVideoInputSchema 
-} from './types/mcp.js';
 import { log } from './utils/logger.js';
 
 /**
@@ -61,11 +58,24 @@ export function createServer(): McpServer {
   // Register tools
   log.info('Registering video generation tools');
   
+  // Define schemas for tool inputs
+  const TextToVideoConfigSchema = z.object({
+    aspectRatio: z.enum(['16:9', '9:16']).optional(),
+    personGeneration: z.enum(['dont_allow', 'allow_adult']).optional(),
+    numberOfVideos: z.union([z.literal(1), z.literal(2)]).optional(),
+    durationSeconds: z.number().min(5).max(8).optional(),
+    enhancePrompt: z.boolean().optional(),
+    negativePrompt: z.string().optional(),
+  });
+
   // Register the text-to-video generation tool
   server.tool(
     'generateVideoFromText',
     'Generate a video from a text prompt',
-    TextToVideoInputSchema.shape,
+    {
+      prompt: z.string().min(1).max(1000),
+      config: TextToVideoConfigSchema.optional(),
+    },
     generateVideoFromText
   );
   
@@ -73,7 +83,11 @@ export function createServer(): McpServer {
   server.tool(
     'generateVideoFromImage',
     'Generate a video from an image',
-    ImageToVideoInputSchema.shape,
+    {
+      prompt: z.string().min(1).max(1000).optional(),
+      image: z.string().min(1),
+      config: TextToVideoConfigSchema.optional(),
+    },
     generateVideoFromImage
   );
   
