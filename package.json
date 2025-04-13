@@ -1,0 +1,36 @@
+{
+  "name": "mcp-video-generation-veo2",
+  "version": "1.0.0",
+  "description": "MCP server for generating videos with Google Veo2",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc -w & node --watch dist/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "mcp",
+    "video",
+    "generation",
+    "veo2",
+    "gemini"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@google/generative-ai": "^0.2.0",
+    "@modelcontextprotocol/sdk": "latest",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "uuid": "^11.1.0",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.10.5",
+    "@types/uuid": "^10.0.0",
+    "typescript": "^5.3.3"
+  }
+}
