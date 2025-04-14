@@ -34,6 +34,15 @@ This project implements a Model Context Protocol (MCP) server that exposes Googl
    # Edit .env and add your Google API key
    ```
 
+   The `.env` file supports the following variables:
+   - `GOOGLE_API_KEY`: Your Google API key (required)
+   - `PORT`: Server port (default: 3000)
+   - `STORAGE_DIR`: Directory for storing generated videos (default: ./generated-videos)
+   - `LOG_LEVEL`: Logging level (default: fatal)
+     - Available levels: verbose, debug, info, warn, error, fatal, none
+     - For development, set to `debug` or `info` for more detailed logs
+     - For production, keep as `fatal` to minimize console output
+
 4. Build the project:
    ```bash
    npm run build

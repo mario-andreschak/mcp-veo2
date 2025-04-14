@@ -3,6 +3,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import config from '../config.js';
+import { log } from '../utils/logger.js';
 // Define types for video generation
 interface VideoConfig {
   aspectRatio?: '16:9' | '9:16';
@@ -47,7 +48,7 @@ export class VeoClient {
     
     // Ensure the storage directory exists
     this.ensureStorageDir().catch(err => {
-      console.error('Failed to create storage directory:', err);
+      log.fatal('Failed to create storage directory:', err);
       process.exit(1);
     });
   }
@@ -125,7 +126,7 @@ export class VeoClient {
       
       return text;
     } catch (error) {
-      console.error('Error generating video:', error);
+      log.error('Error generating video:', error);
       throw error;
     }
   }
@@ -162,7 +163,7 @@ export class VeoClient {
       // Save the video to disk
       return this.saveVideo(result, prompt, config);
     } catch (error) {
-      console.error('Error generating video from text:', error);
+      log.error('Error generating video from text:', error);
       throw error;
     }
   }
@@ -203,7 +204,7 @@ export class VeoClient {
       // Save the video to disk
       return this.saveVideo(result, prompt, config);
     } catch (error) {
-      console.error('Error generating video from image:', error);
+      log.error('Error generating video from image:', error);
       throw error;
     }
   }
@@ -290,7 +291,7 @@ export class VeoClient {
       
       return { data, metadata };
     } catch (error) {
-      console.error(`Error getting video ${id}:`, error);
+      log.error(`Error getting video ${id}:`, error);
       throw new Error(`Video not found: ${id}`);
     }
   }
@@ -307,7 +308,7 @@ export class VeoClient {
       const metadataJson = await fs.readFile(metadataPath, 'utf-8');
       return JSON.parse(metadataJson) as StoredVideoMetadata;
     } catch (error) {
-      console.error(`Error getting metadata for video ${id}:`, error);
+      log.error(`Error getting metadata for video ${id}:`, error);
       throw new Error(`Video metadata not found: ${id}`);
     }
   }
@@ -335,7 +336,7 @@ export class VeoClient {
       // Wait for all metadata to be read
       return Promise.all(metadataPromises);
     } catch (error) {
-      console.error('Error listing videos:', error);
+      log.error('Error listing videos:', error);
       return [];
     }
   }

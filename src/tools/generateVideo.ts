@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { veoClient } from '../services/veoClient.js';
 import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { log } from '../utils/logger.js';
 
 // Define schemas for tool inputs
 const AspectRatioSchema = z.enum(['16:9', '9:16']);
@@ -58,7 +59,7 @@ export async function generateVideoFromText(
       ]
     };
   } catch (error) {
-    console.error('Error generating video from text:', error);
+    log.error('Error generating video from text:', error);
     
     // Return the error
     return {
@@ -102,7 +103,7 @@ export async function generateVideoFromImage(
       ]
     };
   } catch (error) {
-    console.error('Error generating video from image:', error);
+    log.error('Error generating video from image:', error);
     
     // Return the error
     return {
@@ -146,7 +147,7 @@ export async function listGeneratedVideos(): Promise<CallToolResult> {
       ]
     };
   } catch (error) {
-    console.error('Error listing videos:', error);
+    log.error('Error listing videos:', error);
     
     // Return the error
     return {

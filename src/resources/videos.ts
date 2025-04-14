@@ -1,6 +1,7 @@
 import { ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { veoClient } from '../services/veoClient.js';
 import { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
+import { log } from '../utils/logger.js';
 
 /**
  * Resource template for accessing generated videos
@@ -58,7 +59,7 @@ export async function readVideoResource(
       ]
     };
   } catch (error) {
-    console.error(`Error reading video resource ${id}:`, error);
+    log.error(`Error reading video resource ${id}:`, error);
     throw error;
   }
 }

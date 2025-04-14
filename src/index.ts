@@ -79,18 +79,18 @@ async function main() {
         log.info(`Connect to http://localhost:${port}/sse`);
       });
     } else {
-      log.error(`Unknown transport type: ${transportType}`);
+      log.fatal(`Unknown transport type: ${transportType}`);
       log.info('Usage: npm start [stdio|sse]');
       process.exit(1);
     }
   } catch (error) {
-    log.error('Error starting server:', error);
+    log.fatal('Error starting server:', error);
     process.exit(1);
   }
 }
 
 // Start the server
 main().catch(err => {
-  console.error('Unhandled error:', err);
+  log.fatal('Unhandled error:', err);
   process.exit(1);
 });
