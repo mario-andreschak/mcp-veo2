@@ -1,9 +1,10 @@
-import { GoogleGenerativeAI, GenerativeModel, Part } from '@google/generative-ai';
+import { GoogleGenAI } from '@google/genai';
 import fs from 'fs/promises';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import config from '../config.js';
 import { log } from '../utils/logger.js';
+
 // Define types for video generation
 interface VideoConfig {
   aspectRatio?: '16:9' | '9:16';
@@ -32,7 +33,7 @@ interface StoredVideoMetadata {
  * Client for interacting with Google's Veo2 video generation API
  */
 export class VeoClient {
-  private genAI: GoogleGenerativeAI;
+  private client: GoogleGenAI;
   private model: string = 'veo-2.0-generate-001';
   private storageDir: string;
   
@@ -40,8 +41,8 @@ export class VeoClient {
    * Creates a new VeoClient instance
    */
   constructor() {
-    // Initialize the Google Generative AI client
-    this.genAI = new GoogleGenerativeAI(config.GOOGLE_API_KEY);
+    // Initialize the Google Gen AI client
+    this.client = new GoogleGenAI({ apiKey: config.GOOGLE_API_KEY });
     
     // Set the storage directory
     this.storageDir = config.STORAGE_DIR;
@@ -67,12 +68,10 @@ export class VeoClient {
   /**
    * Wrapper method to generate a video
    * 
-   * @param model The generative model
    * @param params The video generation parameters
    * @returns The video data
    */
   private async generateVideo(
-    model: GenerativeModel,
     params: {
       prompt: string;
       image?: string;
@@ -85,17 +84,15 @@ export class VeoClient {
     }
   ): Promise<string> {
     try {
-      // Create parts array for the request
-      const parts = [];
+      // Create contents array for the request
+      const contents: Array<string | { inlineData: { data: string; mimeType: string } }> = [];
       
       // Add text prompt
-      parts.push({
-        text: params.prompt || 'Generate a video'
-      });
+      contents.push(params.prompt || 'Generate a video');
       
       // Add image if provided
       if (params.image) {
-        parts.push({
+        contents.push({
           inlineData: {
             data: params.image,
             mimeType: 'image/jpeg'
@@ -103,28 +100,57 @@ export class VeoClient {
         });
       }
       
-      // Call the generateContent method
-      const response = await model.generateContent(parts);
-    
-      // Extract the video data from the response
-      const result = await response.response;
+      // Create generation config
+      const generateConfig: Record<string, any> = {};
       
-      // Handle potential undefined values
-      if (!result.candidates || result.candidates.length === 0) {
+      // Add optional parameters if provided
+      if (params.aspectRatio) {
+        generateConfig.aspectRatio = params.aspectRatio;
+      }
+      
+      if (params.personGeneration) {
+        generateConfig.personGeneration = params.personGeneration;
+      }
+      
+      if (params.numberOfVideos) {
+        generateConfig.numberOfVideos = params.numberOfVideos;
+      }
+      
+      if (params.durationSeconds) {
+        generateConfig.durationSeconds = params.durationSeconds;
+      }
+      
+      if (params.enhancePrompt !== undefined) {
+        generateConfig.enhancePrompt = params.enhancePrompt;
+      }
+      
+      if (params.negativePrompt) {
+        generateConfig.negativePrompt = params.negativePrompt;
+      }
+      
+      // Call the generateContent method
+      const response = await this.client.models.generateContent({
+        model: this.model,
+        contents,
+        config: generateConfig
+      });
+      
+      // Extract the video data from the response
+      if (!response.candidates || response.candidates.length === 0) {
         throw new Error('No candidates returned from the model');
       }
       
-      const candidate = result.candidates[0];
+      const candidate = response.candidates[0];
       if (!candidate.content || !candidate.content.parts || candidate.content.parts.length === 0) {
         throw new Error('No content parts returned from the model');
       }
       
-      const text = candidate.content.parts[0].text;
-      if (!text) {
+      const part = candidate.content.parts[0];
+      if (!part.text) {
         throw new Error('No text content returned from the model');
       }
       
-      return text;
+      return part.text;
     } catch (error) {
       log.error('Error generating video:', error);
       throw error;
@@ -150,8 +176,7 @@ export class VeoClient {
       };
       
       // Generate the video using the Gemini API
-      const model = this.genAI.getGenerativeModel({ model: this.model });
-      const videoData = await this.generateVideo(model, params);
+      const videoData = await this.generateVideo(params);
       
       // Create a result object
       const result = {
@@ -191,8 +216,7 @@ export class VeoClient {
       };
       
       // Generate the video using the Gemini API
-      const model = this.genAI.getGenerativeModel({ model: this.model });
-      const videoData = await this.generateVideo(model, params);
+      const videoData = await this.generateVideo(params);
       
       // Create a result object
       const result = {
