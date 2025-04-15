@@ -88,7 +88,7 @@ export class VeoClient {
       const contents: Array<string | { inlineData: { data: string; mimeType: string } }> = [];
       
       // Add text prompt
-      contents.push(params.prompt || 'Generate a video');
+      contents.push(params.prompt);
       
       // Add image if provided
       if (params.image) {
