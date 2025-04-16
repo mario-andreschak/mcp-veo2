@@ -1,5 +1,7 @@
 # MCP Video Generation with Veo2
 
+[![smithery badge](https://smithery.ai/badge/@mario-andreschak/mcp-video-generation-veo2)](https://smithery.ai/server/@mario-andreschak/mcp-video-generation-veo2)
+
 This project implements a Model Context Protocol (MCP) server that exposes Google's Veo2 video generation capabilities. It allows clients to generate videos from text prompts or images, and access the generated videos through MCP resources.
 
 ## Features
@@ -17,6 +19,15 @@ This project implements a Model Context Protocol (MCP) server that exposes Googl
 
 ## Installation
 
+### Installing via Smithery
+
+To install mcp-video-generation-veo2 for Claude Desktop automatically via [Smithery](https://smithery.ai/server/@mario-andreschak/mcp-video-generation-veo2):
+
+```bash
+npx -y @smithery/cli install @mario-andreschak/mcp-video-generation-veo2 --client claude
+```
+
+### Manual Installation
 1. Clone the repository:
    ```bash
    git clone https://github.com/yourusername/mcp-video-generation-veo2.git
