@@ -1,0 +1,43 @@
+# Smithery configuration file: https://smithery.ai/docs/config#smitheryyaml
+
+startCommand:
+  type: stdio
+  configSchema:
+    # JSON Schema defining the configuration options for the MCP.
+    type: object
+    required:
+      - googleApiKey
+    properties:
+      googleApiKey:
+        type: string
+        description: Your Google API key for accessing the Gemini and Veo2 services.
+      port:
+        type: number
+        default: 3000
+        description: Port for the server to listen on.
+      storageDir:
+        type: string
+        default: ./generated-videos
+        description: Directory path to store generated videos.
+      logLevel:
+        type: string
+        default: fatal
+        description: Logging level, e.g., debug, info, warn, error, fatal.
+  commandFunction:
+    # A JS function that produces the CLI command based on the given config to start the MCP on stdio.
+    |-
+    (config) => ({
+      command: 'npm',
+      args: ['start'],
+      env: {
+        GOOGLE_API_KEY: config.googleApiKey,
+        PORT: config.port ? String(config.port) : '3000',
+        STORAGE_DIR: config.storageDir || './generated-videos',
+        LOG_LEVEL: config.logLevel || 'fatal'
+      }
+    })
+  exampleConfig:
+    googleApiKey: YOUR_GOOGLE_API_KEY
+    port: 3000
+    storageDir: ./generated-videos
+    logLevel: info
