@@ -190,7 +190,6 @@ export async function generateVideoFromImage(args: {
   image: string | { type: 'image'; mimeType: string; data: string };
   prompt?: string;
   aspectRatio?: '16:9' | '9:16';
-  personGeneration?: 'dont_allow' | 'allow_adult';
   numberOfVideos?: 1 | 2;
   durationSeconds?: number;
   enhancePrompt?: boolean | string;
@@ -231,7 +230,6 @@ export async function generateVideoFromImage(args: {
     // Create config object from individual parameters with defaults
     const config = {
       aspectRatio: args.aspectRatio || '16:9',
-      personGeneration: args.personGeneration || 'dont_allow',
       numberOfVideos: args.numberOfVideos || 1,
       durationSeconds: args.durationSeconds || 5,
       enhancePrompt: enhancePrompt,

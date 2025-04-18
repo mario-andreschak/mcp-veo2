@@ -198,7 +198,7 @@ export class VeoClient {
       if (config?.durationSeconds) {
         generateConfig.durationSeconds = config.durationSeconds;
       }
-      
+            
       if (config?.negativePrompt) {
         generateConfig.negativePrompt = config.negativePrompt;
       }
@@ -354,9 +354,7 @@ export class VeoClient {
         generateConfig.aspectRatio = config.aspectRatio;
       }
       
-      if (config?.personGeneration) {
-        generateConfig.personGeneration = config.personGeneration;
-      }
+      // Note: personGeneration is not allowed for image-to-video generation
       
       if (config?.numberOfVideos) {
         generateConfig.numberOfVideos = config.numberOfVideos;
