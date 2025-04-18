@@ -135,3 +135,5 @@ dist
 .yarn/install-state.gz
 .pnp.*
 src/standalone_python.py
+src/example_videofromimage.ts
+src/standalone_typescript.ts

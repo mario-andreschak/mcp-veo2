@@ -4,8 +4,11 @@ import { videoResourceTemplate, readVideoResource, videoPromptsResource } from '
 import { 
   generateVideoFromText, 
   generateVideoFromImage, 
+  generateImage,
+  generateVideoFromGeneratedImage,
   listGeneratedVideos 
 } from './tools/generateVideo.js';
+import { ImageContent } from '@modelcontextprotocol/sdk/types.js';
 import { log } from './utils/logger.js';
 
 /**
@@ -85,10 +88,44 @@ export function createServer(): McpServer {
     'Generate a video from an image',
     {
       prompt: z.string().min(1).max(1000).optional(),
-      image: z.string().min(1),
+      image: z.object({
+        type: z.literal('image'),
+        mimeType: z.string(),
+        data: z.string().min(1) // base64 encoded image data
+      }),
       config: TextToVideoConfigSchema.optional(),
     },
     generateVideoFromImage
+  );
+  
+  // Schema for image generation configuration
+  const ImageGenerationConfigSchema = z.object({
+    numberOfImages: z.number().min(1).max(4).optional(),
+    // Add other Imagen parameters as needed
+  });
+  
+  // Register the image generation tool
+  server.tool(
+    'generateImage',
+    'Generate an image from a text prompt using Google Imagen',
+    {
+      prompt: z.string().min(1).max(1000),
+      config: ImageGenerationConfigSchema.optional(),
+    },
+    generateImage
+  );
+  
+  // Register the image-to-video generation with generated image tool
+  server.tool(
+    'generateVideoFromGeneratedImage',
+    'Generate a video from a generated image (one-step process)',
+    {
+      prompt: z.string().min(1).max(1000),
+      videoPrompt: z.string().min(1).max(1000).optional(),
+      imageConfig: ImageGenerationConfigSchema.optional(),
+      videoConfig: TextToVideoConfigSchema.optional(),
+    },
+    generateVideoFromGeneratedImage
   );
   
   // Register the list videos tool

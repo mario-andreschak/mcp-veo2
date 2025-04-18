@@ -1,8 +1,10 @@
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, GenerateVideosParameters } from '@google/genai';
 import fs from 'fs/promises';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
-import config from '../config.js';
+import { createWriteStream } from 'fs';
+import { Readable } from 'stream';
+import appConfig from '../config.js';
 import { log } from '../utils/logger.js';
 
 // Define types for video generation
@@ -13,6 +15,18 @@ interface VideoConfig {
   durationSeconds?: number;
   enhancePrompt?: boolean;
   negativePrompt?: string;
+}
+
+// Define types for video generation operation
+interface VideoOperation {
+  done: boolean;
+  response?: {
+    generatedVideos?: Array<{
+      video?: {
+        uri?: string;
+      };
+    }>;
+  };
 }
 
 // Metadata for stored videos
@@ -42,10 +56,10 @@ export class VeoClient {
    */
   constructor() {
     // Initialize the Google Gen AI client
-    this.client = new GoogleGenAI({ apiKey: config.GOOGLE_API_KEY });
+    this.client = new GoogleGenAI({ apiKey: appConfig.GOOGLE_API_KEY });
     
     // Set the storage directory
-    this.storageDir = config.STORAGE_DIR;
+    this.storageDir = appConfig.STORAGE_DIR;
     
     // Ensure the storage directory exists
     this.ensureStorageDir().catch(err => {
@@ -66,98 +80,6 @@ export class VeoClient {
   }
   
   /**
-   * Wrapper method to generate a video
-   * 
-   * @param params The video generation parameters
-   * @returns The video data
-   */
-  private async generateVideo(
-    params: {
-      prompt: string;
-      image?: string;
-      aspectRatio?: string;
-      personGeneration?: string;
-      numberOfVideos?: number;
-      durationSeconds?: number;
-      enhancePrompt?: boolean;
-      negativePrompt?: string;
-    }
-  ): Promise<string> {
-    try {
-      // Create contents array for the request
-      const contents: Array<string | { inlineData: { data: string; mimeType: string } }> = [];
-      
-      // Add text prompt
-      contents.push(params.prompt);
-      
-      // Add image if provided
-      if (params.image) {
-        contents.push({
-          inlineData: {
-            data: params.image,
-            mimeType: 'image/jpeg'
-          }
-        });
-      }
-      
-      // Create generation config
-      const generateConfig: Record<string, any> = {};
-      
-      // Add optional parameters if provided
-      if (params.aspectRatio) {
-        generateConfig.aspectRatio = params.aspectRatio;
-      }
-      
-      if (params.personGeneration) {
-        generateConfig.personGeneration = params.personGeneration;
-      }
-      
-      if (params.numberOfVideos) {
-        generateConfig.numberOfVideos = params.numberOfVideos;
-      }
-      
-      if (params.durationSeconds) {
-        generateConfig.durationSeconds = params.durationSeconds;
-      }
-      
-      if (params.enhancePrompt !== undefined) {
-        generateConfig.enhancePrompt = params.enhancePrompt;
-      }
-      
-      if (params.negativePrompt) {
-        generateConfig.negativePrompt = params.negativePrompt;
-      }
-      
-      // Call the generateContent method
-      const response = await this.client.models.generateContent({
-        model: this.model,
-        contents,
-        config: generateConfig
-      });
-      
-      // Extract the video data from the response
-      if (!response.candidates || response.candidates.length === 0) {
-        throw new Error('No candidates returned from the model');
-      }
-      
-      const candidate = response.candidates[0];
-      if (!candidate.content || !candidate.content.parts || candidate.content.parts.length === 0) {
-        throw new Error('No content parts returned from the model');
-      }
-      
-      const part = candidate.content.parts[0];
-      if (!part.text) {
-        throw new Error('No text content returned from the model');
-      }
-      
-      return part.text;
-    } catch (error) {
-      log.error('Error generating video:', error);
-      throw error;
-    }
-  }
-  
-  /**
    * Generates a video from a text prompt
    * 
    * @param prompt The text prompt for video generation
@@ -169,24 +91,107 @@ export class VeoClient {
     config?: VideoConfig
   ): Promise<StoredVideoMetadata> {
     try {
-      // Prepare the request parameters
-      const params = {
-        prompt,
-        ...config
+      log.info('Generating video from text prompt');
+      log.verbose('Text prompt parameters:', JSON.stringify({ prompt, config }));
+      
+      // Create generation config
+      const generateConfig: Record<string, any> = {};
+      
+      // Add optional parameters if provided
+      if (config?.aspectRatio) {
+        generateConfig.aspectRatio = config.aspectRatio;
+      }
+      
+      if (config?.personGeneration) {
+        generateConfig.personGeneration = config.personGeneration;
+      }
+      
+      if (config?.numberOfVideos) {
+        generateConfig.numberOfVideos = config.numberOfVideos;
+      }
+      
+      if (config?.durationSeconds) {
+        generateConfig.durationSeconds = config.durationSeconds;
+      }
+      
+      if (config?.enhancePrompt !== undefined) {
+        generateConfig.enhancePrompt = config.enhancePrompt;
+      }
+      
+      if (config?.negativePrompt) {
+        generateConfig.negativePrompt = config.negativePrompt;
+      }
+      
+      // Initialize request parameters
+      const requestParams = {
+        model: this.model,
+        prompt: prompt,
+        config: generateConfig
       };
       
-      // Generate the video using the Gemini API
-      const videoData = await this.generateVideo(params);
+      // Call the generateVideos method
+      log.debug('Calling generateVideos API');
+      let operation = await this.client.models.generateVideos(requestParams);
       
-      // Create a result object
-      const result = {
-        response: {
-          videos: [videoData]
+      // Poll until the operation is complete
+      log.debug('Polling operation status');
+      while (!operation.done) {
+        log.verbose('Operation not complete, waiting...', JSON.stringify(operation));
+        // Wait for 5 seconds before checking again
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        operation = await this.client.operations.getVideosOperation({
+          operation: operation
+        });
+      }
+      
+      log.debug('Video generation operation complete');
+      log.verbose('Operation result:', JSON.stringify(operation));
+      
+      // Check if we have generated videos
+      if (!operation.response?.generatedVideos || operation.response.generatedVideos.length === 0) {
+        throw new Error('No videos generated in the response');
+      }
+      
+      // Download each video
+      const videoPromises = operation.response.generatedVideos.map(async (generatedVideo, index) => {
+        if (!generatedVideo.video?.uri) {
+          log.warn('Generated video missing URI');
+          return null;
         }
-      };
+        
+        // Append API key to the URI - use the imported config module
+        const videoUri = `${generatedVideo.video.uri}&key=${appConfig.GOOGLE_API_KEY}`;
+        log.debug(`Fetching video ${index + 1} from URI`);
+        
+        // Fetch the video
+        const response = await fetch(videoUri);
+        if (!response.ok) {
+          throw new Error(`Failed to fetch video: ${response.status} ${response.statusText}`);
+        }
+        
+        // Convert the response to a buffer
+        const arrayBuffer = await response.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+        
+        // Generate a unique ID for the video
+        const id = index === 0 ? uuidv4() : `${uuidv4()}_${index}`;
+        
+        // Save the video to disk
+        return this.saveVideoBuffer(buffer, prompt, config, id);
+      });
       
-      // Save the video to disk
-      return this.saveVideo(result, prompt, config);
+      // Wait for all videos to be downloaded and saved
+      const metadataArray = await Promise.all(videoPromises);
+      
+      // Filter out any null values (from videos with missing URIs)
+      const validMetadata = metadataArray.filter(metadata => metadata !== null);
+      
+      if (validMetadata.length === 0) {
+        throw new Error('Failed to save any videos');
+      }
+      
+      // Return the first video's metadata
+      return validMetadata[0] as StoredVideoMetadata;
     } catch (error) {
       log.error('Error generating video from text:', error);
       throw error;
@@ -196,37 +201,123 @@ export class VeoClient {
   /**
    * Generates a video from an image
    * 
-   * @param image Base64-encoded image data
+   * @param imageBytes Base64-encoded image data
    * @param prompt Optional text prompt for video generation
    * @param config Optional configuration for video generation
    * @returns Metadata for the generated video
    */
   async generateFromImage(
-    image: string,
+    imageBytes: string,
     prompt?: string,
-    config?: VideoConfig
+    config?: VideoConfig,
+    mimeType: string = 'image/png'
   ): Promise<StoredVideoMetadata> {
     try {
-      // Prepare the request parameters
-      // Ensure prompt is a string
-      const params = {
-        image,
+      log.info('Generating video from image');
+      log.verbose('Image prompt parameters:', JSON.stringify({ prompt, config, mimeType }));
+      
+      // Create generation config
+      const generateConfig: Record<string, any> = {};
+      
+      // Add optional parameters if provided
+      if (config?.aspectRatio) {
+        generateConfig.aspectRatio = config.aspectRatio;
+      }
+      
+      if (config?.personGeneration) {
+        generateConfig.personGeneration = config.personGeneration;
+      }
+      
+      if (config?.numberOfVideos) {
+        generateConfig.numberOfVideos = config.numberOfVideos;
+      }
+      
+      if (config?.durationSeconds) {
+        generateConfig.durationSeconds = config.durationSeconds;
+      }
+      
+      if (config?.enhancePrompt !== undefined) {
+        generateConfig.enhancePrompt = config.enhancePrompt;
+      }
+      
+      if (config?.negativePrompt) {
+        generateConfig.negativePrompt = config.negativePrompt;
+      }
+      
+      // Initialize request parameters with the image
+      const requestParams = {
+        model: this.model,
         prompt: prompt || 'Generate a video from this image',
-        ...config
+        image: {
+          imageBytes: imageBytes,
+          mimeType: mimeType
+        },
+        config: generateConfig
       };
       
-      // Generate the video using the Gemini API
-      const videoData = await this.generateVideo(params);
+      // Call the generateVideos method
+      log.debug('Calling generateVideos API with image');
+      let operation = await this.client.models.generateVideos(requestParams);
       
-      // Create a result object
-      const result = {
-        response: {
-          videos: [videoData]
+      // Poll until the operation is complete
+      log.debug('Polling operation status');
+      while (!operation.done) {
+        log.verbose('Operation not complete, waiting...', JSON.stringify(operation));
+        // Wait for 5 seconds before checking again
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        operation = await this.client.operations.getVideosOperation({
+          operation: operation
+        });
+      }
+      
+      log.debug('Video generation operation complete');
+      log.verbose('Operation result:', JSON.stringify(operation));
+      
+      // Check if we have generated videos
+      if (!operation.response?.generatedVideos || operation.response.generatedVideos.length === 0) {
+        throw new Error('No videos generated in the response');
+      }
+      
+      // Download each video
+      const videoPromises = operation.response.generatedVideos.map(async (generatedVideo, index) => {
+        if (!generatedVideo.video?.uri) {
+          log.warn('Generated video missing URI');
+          return null;
         }
-      };
+        
+        // Append API key to the URI - use the imported config module
+        const videoUri = `${generatedVideo.video.uri}&key=${appConfig.GOOGLE_API_KEY}`;
+        log.debug(`Fetching video ${index + 1} from URI`);
+        
+        // Fetch the video
+        const response = await fetch(videoUri);
+        if (!response.ok) {
+          throw new Error(`Failed to fetch video: ${response.status} ${response.statusText}`);
+        }
+        
+        // Convert the response to a buffer
+        const arrayBuffer = await response.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+        
+        // Generate a unique ID for the video
+        const id = index === 0 ? uuidv4() : `${uuidv4()}_${index}`;
+        
+        // Save the video to disk
+        return this.saveVideoBuffer(buffer, prompt, config, id);
+      });
       
-      // Save the video to disk
-      return this.saveVideo(result, prompt, config);
+      // Wait for all videos to be downloaded and saved
+      const metadataArray = await Promise.all(videoPromises);
+      
+      // Filter out any null values (from videos with missing URIs)
+      const validMetadata = metadataArray.filter(metadata => metadata !== null);
+      
+      if (validMetadata.length === 0) {
+        throw new Error('Failed to save any videos');
+      }
+      
+      // Return the first video's metadata
+      return validMetadata[0] as StoredVideoMetadata;
     } catch (error) {
       log.error('Error generating video from image:', error);
       throw error;
@@ -234,56 +325,56 @@ export class VeoClient {
   }
   
   /**
-   * Saves a generated video to disk
+   * Saves a video buffer to disk
    * 
-   * @param result The video generation result
+   * @param videoBuffer The video buffer to save
    * @param prompt The prompt used for generation
    * @param config The configuration used for generation
+   * @param id The ID to use for the video
    * @returns Metadata for the saved video
    */
-  private async saveVideo(
-    result: { response: { videos: string[] } },
+  private async saveVideoBuffer(
+    videoBuffer: Buffer,
     prompt?: string,
-    config?: VideoConfig
+    config?: VideoConfig,
+    id: string = uuidv4()
   ): Promise<StoredVideoMetadata> {
-    // Generate a unique ID for the video
-    const id = uuidv4();
-    
-    // Get the video data from the response using the properly typed structure
-    const videoData = result.response.videos[0];
-    
-    if (!videoData) {
-      throw new Error('No video data found in the response');
+    try {
+      log.debug(`Saving video with ID: ${id}`);
+      
+      // Determine the file extension based on MIME type
+      const mimeType = 'video/mp4'; // Assuming Veo2 returns MP4 videos
+      const extension = '.mp4';
+      
+      // Create the file path
+      const filePath = path.join(this.storageDir, `${id}${extension}`);
+      
+      // Save the video to disk
+      await fs.writeFile(filePath, videoBuffer);
+      
+      // Create and return the metadata
+      const metadata: StoredVideoMetadata = {
+        id,
+        createdAt: new Date().toISOString(),
+        prompt,
+        config: {
+          aspectRatio: config?.aspectRatio || '16:9',
+          personGeneration: config?.personGeneration || 'dont_allow',
+          durationSeconds: config?.durationSeconds || 5
+        },
+        mimeType,
+        size: videoBuffer.length
+      };
+      
+      // Save the metadata
+      await this.saveMetadata(id, metadata);
+      
+      log.info(`Video saved successfully with ID: ${id}`);
+      return metadata;
+    } catch (error) {
+      log.error(`Error saving video buffer: ${error}`);
+      throw error;
     }
-    
-    // Determine the file extension based on MIME type
-    const mimeType = 'video/mp4'; // Assuming Veo2 returns MP4 videos
-    const extension = '.mp4';
-    
-    // Create the file path
-    const filePath = path.join(this.storageDir, `${id}${extension}`);
-    
-    // Save the video to disk
-    await fs.writeFile(filePath, Buffer.from(videoData, 'base64'));
-    
-    // Create and return the metadata
-    const metadata: StoredVideoMetadata = {
-      id,
-      createdAt: new Date().toISOString(),
-      prompt,
-      config: {
-        aspectRatio: config?.aspectRatio || '16:9',
-        personGeneration: config?.personGeneration || 'dont_allow',
-        durationSeconds: config?.durationSeconds || 5
-      },
-      mimeType,
-      size: Buffer.from(videoData, 'base64').length
-    };
-    
-    // Save the metadata
-    await this.saveMetadata(id, metadata);
-    
-    return metadata;
   }
   
   /**
