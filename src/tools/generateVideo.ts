@@ -74,6 +74,7 @@ export async function generateVideoFromText(
             message: 'Video generated successfully',
             videoId: metadata.id,
             resourceUri: `videos://${metadata.id}`,
+            filepath: metadata.filepath,
             metadata
           }, null, 2)
         }
@@ -127,6 +128,7 @@ export async function generateVideoFromImage(
             message: 'Video generated successfully',
             videoId: metadata.id,
             resourceUri: `videos://${metadata.id}`,
+            filepath: metadata.filepath,
             metadata
           }, null, 2)
         }
@@ -273,6 +275,7 @@ export async function generateVideoFromGeneratedImage(
             message: 'Video generated from image successfully',
             videoId: metadata.id,
             resourceUri: `videos://${metadata.id}`,
+            filepath: metadata.filepath,
             metadata
           }, null, 2)
         }
@@ -316,7 +319,8 @@ export async function listGeneratedVideos(): Promise<CallToolResult> {
               id: video.id,
               createdAt: video.createdAt,
               prompt: video.prompt,
-              resourceUri: `videos://${video.id}`
+              resourceUri: `videos://${video.id}`,
+              filepath: video.filepath
             }))
           }, null, 2)
         }

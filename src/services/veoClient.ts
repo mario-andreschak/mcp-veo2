@@ -41,6 +41,7 @@ interface StoredVideoMetadata {
   };
   mimeType: string;
   size: number;
+  filepath: string; // Path to the video file on disk
 }
 
 /**
@@ -346,8 +347,8 @@ export class VeoClient {
       const mimeType = 'video/mp4'; // Assuming Veo2 returns MP4 videos
       const extension = '.mp4';
       
-      // Create the file path
-      const filePath = path.join(this.storageDir, `${id}${extension}`);
+      // Create the file path (using absolute path)
+      const filePath = path.resolve(this.storageDir, `${id}${extension}`);
       
       // Save the video to disk
       await fs.writeFile(filePath, videoBuffer);
@@ -363,7 +364,8 @@ export class VeoClient {
           durationSeconds: config?.durationSeconds || 5
         },
         mimeType,
-        size: videoBuffer.length
+        size: videoBuffer.length,
+        filepath: filePath
       };
       
       // Save the metadata
@@ -384,7 +386,7 @@ export class VeoClient {
    * @param metadata The video metadata
    */
   private async saveMetadata(id: string, metadata: StoredVideoMetadata): Promise<void> {
-    const metadataPath = path.join(this.storageDir, `${id}.json`);
+    const metadataPath = path.resolve(this.storageDir, `${id}.json`);
     await fs.writeFile(metadataPath, JSON.stringify(metadata, null, 2));
   }
   
@@ -399,9 +401,20 @@ export class VeoClient {
       // Get the metadata
       const metadata = await this.getMetadata(id);
       
-      // Get the video data
-      const extension = metadata.mimeType === 'video/mp4' ? '.mp4' : '.webm';
-      const filePath = path.join(this.storageDir, `${id}${extension}`);
+      // Get the video data - use the filepath from metadata if available
+      let filePath: string;
+      if (metadata.filepath) {
+        filePath = metadata.filepath;
+      } else {
+        // Fallback to constructing the path
+        const extension = metadata.mimeType === 'video/mp4' ? '.mp4' : '.webm';
+        filePath = path.resolve(this.storageDir, `${id}${extension}`);
+        
+        // Update the metadata with the filepath
+        metadata.filepath = filePath;
+        await this.saveMetadata(id, metadata);
+      }
+      
       const data = await fs.readFile(filePath);
       
       return { data, metadata };
@@ -419,7 +432,7 @@ export class VeoClient {
    */
   async getMetadata(id: string): Promise<StoredVideoMetadata> {
     try {
-      const metadataPath = path.join(this.storageDir, `${id}.json`);
+      const metadataPath = path.resolve(this.storageDir, `${id}.json`);
       const metadataJson = await fs.readFile(metadataPath, 'utf-8');
       return JSON.parse(metadataJson) as StoredVideoMetadata;
     } catch (error) {
@@ -443,7 +456,7 @@ export class VeoClient {
       
       // Read and parse each metadata file
       const metadataPromises = metadataFiles.map(async file => {
-        const filePath = path.join(this.storageDir, file);
+        const filePath = path.resolve(this.storageDir, file);
         const metadataJson = await fs.readFile(filePath, 'utf-8');
         return JSON.parse(metadataJson) as StoredVideoMetadata;
       });

@@ -19,7 +19,8 @@ export const videoResourceTemplate = new ResourceTemplate(
           uri: `videos://${video.id}`,
           name: `Video: ${video.prompt || 'Untitled'}`,
           description: `Generated on ${new Date(video.createdAt).toLocaleString()}`,
-          mimeType: video.mimeType
+          mimeType: video.mimeType,
+          filepath: video.filepath
         }))
       };
     }
@@ -54,7 +55,8 @@ export async function readVideoResource(
         {
           uri: uri.href,
           mimeType: metadata.mimeType,
-          blob: data.toString('base64')
+          blob: data.toString('base64'),
+          filepath: metadata.filepath
         }
       ]
     };
