@@ -8,6 +8,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsc -w & node --watch dist/index.js",
+    "debug": "npx @modelcontextprotocol/inspector node --no-deprecation dist/index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [

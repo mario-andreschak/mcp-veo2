@@ -1,12 +1,15 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { videoResourceTemplate, readVideoResource, videoPromptsResource } from './resources/videos.js';
+import { imageResourceTemplate, readImageResource, imagePromptsResource } from './resources/images.js';
 import { 
   generateVideoFromText, 
   generateVideoFromImage, 
   generateImage,
   generateVideoFromGeneratedImage,
-  listGeneratedVideos 
+  listGeneratedVideos,
+  listGeneratedImages,
+  getImage
 } from './tools/generateVideo.js';
 import { ImageContent } from '@modelcontextprotocol/sdk/types.js';
 import { log } from './utils/logger.js';
@@ -36,7 +39,7 @@ export function createServer(): McpServer {
   log.info('Initializing MCP server for Veo2 video generation');
   
   // Register resources
-  log.info('Registering video resources');
+  log.info('Registering video and image resources');
   
   // Register the video resource template
   server.resource(
@@ -45,12 +48,15 @@ export function createServer(): McpServer {
     {
       description: 'Access generated videos'
     },
-    readVideoResource
+    async (uri, variables) => {
+      // Since we can't access query parameters directly, we'll just pass an empty URLSearchParams
+      return readVideoResource(uri, variables);
+    }
   );
   
   // Register the video templates resource
   server.resource(
-    'templates',
+    'video-templates',
     videoPromptsResource.uri,
     {
       description: videoPromptsResource.description
@@ -58,17 +64,40 @@ export function createServer(): McpServer {
     async () => videoPromptsResource.read()
   );
   
+  // Register the image resource template
+  server.resource(
+    'images',
+    imageResourceTemplate,
+    {
+      description: 'Access generated images'
+    },
+    async (uri, variables) => {
+      // Since we can't access query parameters directly, we'll just pass an empty URLSearchParams
+      return readImageResource(uri, variables);
+    }
+  );
+  
+  // Register the image templates resource
+  server.resource(
+    'image-templates',
+    imagePromptsResource.uri,
+    {
+      description: imagePromptsResource.description
+    },
+    async () => imagePromptsResource.read()
+  );
+  
   // Register tools
   log.info('Registering video generation tools');
   
   // Define schemas for tool inputs
   const TextToVideoConfigSchema = z.object({
-    aspectRatio: z.enum(['16:9', '9:16']).optional(),
-    personGeneration: z.enum(['dont_allow', 'allow_adult']).optional(),
-    numberOfVideos: z.union([z.literal(1), z.literal(2)]).optional(),
-    durationSeconds: z.number().min(5).max(8).optional(),
-    enhancePrompt: z.boolean().optional(),
-    negativePrompt: z.string().optional(),
+    aspectRatio: z.enum(['16:9', '9:16']).default('16:9'),
+    personGeneration: z.enum(['dont_allow', 'allow_adult']).default('dont_allow'),
+    numberOfVideos: z.union([z.literal(1), z.literal(2)]).default(1),
+    durationSeconds: z.number().min(5).max(8).default(5),
+    enhancePrompt: z.boolean().default(false),
+    negativePrompt: z.string().default(''),
   });
 
   // Register the text-to-video generation tool
@@ -77,7 +106,14 @@ export function createServer(): McpServer {
     'Generate a video from a text prompt',
     {
       prompt: z.string().min(1).max(1000),
-      config: TextToVideoConfigSchema.optional(),
+      aspectRatio: z.enum(['16:9', '9:16']).default('16:9'),
+      personGeneration: z.enum(['dont_allow', 'allow_adult']).default('dont_allow'),
+      numberOfVideos: z.union([z.literal(1), z.literal(2)]).default(1),
+      durationSeconds: z.number().min(5).max(8).default(5),
+      enhancePrompt: z.union([z.boolean(), z.string()]).default(false),
+      negativePrompt: z.string().default(''),
+      includeFullData: z.union([z.boolean(), z.string()]).default(false),
+      autoDownload: z.union([z.boolean(), z.string()]).default(true),
     },
     generateVideoFromText
   );
@@ -87,20 +123,34 @@ export function createServer(): McpServer {
     'generateVideoFromImage',
     'Generate a video from an image',
     {
-      prompt: z.string().min(1).max(1000).optional(),
-      image: z.object({
-        type: z.literal('image'),
-        mimeType: z.string(),
-        data: z.string().min(1) // base64 encoded image data
-      }),
-      config: TextToVideoConfigSchema.optional(),
+      prompt: z.string().min(1).max(1000).optional().default('Generate a video from this image'),
+      image: z.union([
+        // ImageContent object
+        z.object({
+          type: z.literal('image'),
+          mimeType: z.string(),
+          data: z.string().min(1) // base64 encoded image data
+        }),
+        // URL string
+        z.string().url(),
+        // File path string
+        z.string().min(1)
+      ]),
+      aspectRatio: z.enum(['16:9', '9:16']).default('16:9'),
+      personGeneration: z.enum(['dont_allow', 'allow_adult']).default('dont_allow'),
+      numberOfVideos: z.union([z.literal(1), z.literal(2)]).default(1),
+      durationSeconds: z.number().min(5).max(8).default(5),
+      enhancePrompt: z.union([z.boolean(), z.string()]).default(false),
+      negativePrompt: z.string().default(''),
+      includeFullData: z.union([z.boolean(), z.string()]).default(false),
+      autoDownload: z.union([z.boolean(), z.string()]).default(true),
     },
     generateVideoFromImage
   );
   
   // Schema for image generation configuration
   const ImageGenerationConfigSchema = z.object({
-    numberOfImages: z.number().min(1).max(4).optional(),
+    numberOfImages: z.number().min(1).max(4).default(1),
     // Add other Imagen parameters as needed
   });
   
@@ -110,7 +160,8 @@ export function createServer(): McpServer {
     'Generate an image from a text prompt using Google Imagen',
     {
       prompt: z.string().min(1).max(1000),
-      config: ImageGenerationConfigSchema.optional(),
+      numberOfImages: z.number().min(1).max(4).default(1),
+      includeFullData: z.union([z.boolean(), z.string()]).default(true),
     },
     generateImage
   );
@@ -122,8 +173,17 @@ export function createServer(): McpServer {
     {
       prompt: z.string().min(1).max(1000),
       videoPrompt: z.string().min(1).max(1000).optional(),
-      imageConfig: ImageGenerationConfigSchema.optional(),
-      videoConfig: TextToVideoConfigSchema.optional(),
+      // Image generation parameters
+      numberOfImages: z.number().min(1).max(4).default(1),
+      // Video generation parameters
+      aspectRatio: z.enum(['16:9', '9:16']).default('16:9'),
+      personGeneration: z.enum(['dont_allow', 'allow_adult']).default('dont_allow'),
+      numberOfVideos: z.union([z.literal(1), z.literal(2)]).default(1),
+      durationSeconds: z.number().min(5).max(8).default(5),
+      enhancePrompt: z.union([z.boolean(), z.string()]).default(false),
+      negativePrompt: z.string().default(''),
+      includeFullData: z.union([z.boolean(), z.string()]).default(false),
+      autoDownload: z.union([z.boolean(), z.string()]).default(true),
     },
     generateVideoFromGeneratedImage
   );
@@ -133,6 +193,24 @@ export function createServer(): McpServer {
     'listGeneratedVideos',
     'List all generated videos',
     listGeneratedVideos
+  );
+  
+  // Register the get image tool
+  server.tool(
+    'getImage',
+    'Get a specific image by ID',
+    {
+      id: z.string().min(1),
+      includeFullData: z.union([z.boolean(), z.string()]).default(true),
+    },
+    getImage
+  );
+  
+  // Register the list images tool
+  server.tool(
+    'listGeneratedImages',
+    'List all generated images',
+    listGeneratedImages
   );
   
   log.info('MCP server initialized successfully');

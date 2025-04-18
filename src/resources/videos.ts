@@ -32,11 +32,13 @@ export const videoResourceTemplate = new ResourceTemplate(
  * 
  * @param uri The resource URI
  * @param variables The URI template variables
+ * @param query Optional query parameters
  * @returns The video resource contents
  */
 export async function readVideoResource(
   uri: URL,
-  variables: Record<string, string | string[]>
+  variables: Record<string, string | string[]>,
+  query?: URLSearchParams
 ): Promise<ReadResourceResult> {
   // The variables object should contain the 'id' from the URI template
   const { id } = variables;
@@ -45,18 +47,43 @@ export async function readVideoResource(
     throw new Error('Missing or invalid video ID in resource URI');
   }
   
+  // Default to false if query is not provided
+  const includeFullData = false;
+  
   try {
-    // Get the video data and metadata
-    const { data, metadata } = await veoClient.getVideo(id);
+    // Get the video data and metadata with the includeFullData option
+    const result = await veoClient.getVideo(id, { includeFullData });
     
-    // Return the video as a blob resource
+    // If includeFullData is true and we have video data, return it
+    if (includeFullData && result.videoData) {
+      return {
+        contents: [
+          {
+            uri: uri.href,
+            mimeType: result.metadata.mimeType,
+            blob: result.videoData,
+            filepath: result.metadata.filepath
+          }
+        ]
+      };
+    }
+    
+    // Otherwise, just return the metadata
     return {
       contents: [
         {
           uri: uri.href,
-          mimeType: metadata.mimeType,
-          blob: data.toString('base64'),
-          filepath: metadata.filepath
+          mimeType: 'application/json',
+          text: JSON.stringify({
+            id: result.metadata.id,
+            createdAt: result.metadata.createdAt,
+            prompt: result.metadata.prompt,
+            config: result.metadata.config,
+            mimeType: result.metadata.mimeType,
+            size: result.metadata.size,
+            filepath: result.metadata.filepath,
+            videoUrl: result.metadata.videoUrl
+          }, null, 2)
         }
       ]
     };

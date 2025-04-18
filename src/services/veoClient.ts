@@ -13,8 +13,13 @@ interface VideoConfig {
   personGeneration?: 'dont_allow' | 'allow_adult';
   numberOfVideos?: 1 | 2;
   durationSeconds?: number;
-  enhancePrompt?: boolean;
   negativePrompt?: string;
+}
+
+// Options for video generation
+interface VideoGenerationOptions {
+  autoDownload?: boolean; // Default: true
+  includeFullData?: boolean; // Default: false
 }
 
 // Define types for video generation operation
@@ -42,6 +47,7 @@ interface StoredVideoMetadata {
   mimeType: string;
   size: number;
   filepath: string; // Path to the video file on disk
+  videoUrl?: string; // URL to the video (when autoDownload is false)
 }
 
 /**
@@ -81,19 +87,97 @@ export class VeoClient {
   }
   
   /**
+   * Processes an image input which can be base64 data, a file path, or a URL
+   * 
+   * @param image The image input (base64 data, file path, or URL)
+   * @param mimeType The MIME type of the image (optional, detected for files and URLs)
+   * @returns The image bytes and MIME type
+   */
+  private async processImageInput(
+    image: string,
+    mimeType?: string
+  ): Promise<{ imageBytes: string; mimeType: string }> {
+    // Check if the image is a URL
+    if (image.startsWith('http://') || image.startsWith('https://')) {
+      log.debug('Processing image from URL');
+      const response = await fetch(image);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch image: ${response.status} ${response.statusText}`);
+      }
+      
+      const arrayBuffer = await response.arrayBuffer();
+      const buffer = Buffer.from(arrayBuffer);
+      
+      // Get the MIME type from the response or use a default
+      const responseMimeType = response.headers.get('content-type') || mimeType || 'image/jpeg';
+      
+      return {
+        imageBytes: buffer.toString('base64'),
+        mimeType: responseMimeType
+      };
+    }
+    
+    // Check if the image is a file path
+    if (image.startsWith('/') || image.includes(':\\') || image.includes(':/')) {
+      log.debug('Processing image from file path');
+      const buffer = await fs.readFile(image);
+      
+      // Determine MIME type from file extension if not provided
+      let detectedMimeType = mimeType;
+      if (!detectedMimeType) {
+        const extension = path.extname(image).toLowerCase();
+        switch (extension) {
+          case '.png':
+            detectedMimeType = 'image/png';
+            break;
+          case '.jpg':
+          case '.jpeg':
+            detectedMimeType = 'image/jpeg';
+            break;
+          case '.gif':
+            detectedMimeType = 'image/gif';
+            break;
+          case '.webp':
+            detectedMimeType = 'image/webp';
+            break;
+          default:
+            detectedMimeType = 'image/jpeg'; // Default
+        }
+      }
+      
+      return {
+        imageBytes: buffer.toString('base64'),
+        mimeType: detectedMimeType
+      };
+    }
+    
+    // Assume it's already base64 data
+    return {
+      imageBytes: image,
+      mimeType: mimeType || 'image/png'
+    };
+  }
+  
+  /**
    * Generates a video from a text prompt
    * 
    * @param prompt The text prompt for video generation
    * @param config Optional configuration for video generation
-   * @returns Metadata for the generated video
+   * @param options Optional generation options
+   * @returns Metadata for the generated video and optionally the video data
    */
   async generateFromText(
     prompt: string, 
-    config?: VideoConfig
-  ): Promise<StoredVideoMetadata> {
+    config?: VideoConfig,
+    options?: VideoGenerationOptions
+  ): Promise<StoredVideoMetadata & { videoData?: string, videoUrl?: string }> {
     try {
       log.info('Generating video from text prompt');
-      log.verbose('Text prompt parameters:', JSON.stringify({ prompt, config }));
+      log.verbose('Text prompt parameters:', JSON.stringify({ prompt, config, options }));
+      
+      // Default options
+      const autoDownload = options?.autoDownload !== false; // Default to true if not specified
+      const includeFullData = options?.includeFullData === true; // Default to false if not specified
       
       // Create generation config
       const generateConfig: Record<string, any> = {};
@@ -113,10 +197,6 @@ export class VeoClient {
       
       if (config?.durationSeconds) {
         generateConfig.durationSeconds = config.durationSeconds;
-      }
-      
-      if (config?.enhancePrompt !== undefined) {
-        generateConfig.enhancePrompt = config.enhancePrompt;
       }
       
       if (config?.negativePrompt) {
@@ -153,7 +233,7 @@ export class VeoClient {
         throw new Error('No videos generated in the response');
       }
       
-      // Download each video
+      // Process each video
       const videoPromises = operation.response.generatedVideos.map(async (generatedVideo, index) => {
         if (!generatedVideo.video?.uri) {
           log.warn('Generated video missing URI');
@@ -162,37 +242,76 @@ export class VeoClient {
         
         // Append API key to the URI - use the imported config module
         const videoUri = `${generatedVideo.video.uri}&key=${appConfig.GOOGLE_API_KEY}`;
-        log.debug(`Fetching video ${index + 1} from URI`);
-        
-        // Fetch the video
-        const response = await fetch(videoUri);
-        if (!response.ok) {
-          throw new Error(`Failed to fetch video: ${response.status} ${response.statusText}`);
-        }
-        
-        // Convert the response to a buffer
-        const arrayBuffer = await response.arrayBuffer();
-        const buffer = Buffer.from(arrayBuffer);
+        log.debug(`Processing video ${index + 1} from URI`);
         
         // Generate a unique ID for the video
         const id = index === 0 ? uuidv4() : `${uuidv4()}_${index}`;
         
-        // Save the video to disk
-        return this.saveVideoBuffer(buffer, prompt, config, id);
+        if (autoDownload) {
+          // Fetch the video
+          const response = await fetch(videoUri);
+          if (!response.ok) {
+            throw new Error(`Failed to fetch video: ${response.status} ${response.statusText}`);
+          }
+          
+          // Convert the response to a buffer
+          const arrayBuffer = await response.arrayBuffer();
+          const buffer = Buffer.from(arrayBuffer);
+          
+          // Save the video to disk
+          return this.saveVideoBuffer(buffer, prompt, config, id);
+        } else {
+          // Just return metadata with the URL
+          const metadata: StoredVideoMetadata = {
+            id,
+            createdAt: new Date().toISOString(),
+            prompt,
+            config: {
+              aspectRatio: config?.aspectRatio || '16:9',
+              personGeneration: config?.personGeneration || 'dont_allow',
+              durationSeconds: config?.durationSeconds || 5
+            },
+            mimeType: 'video/mp4',
+            size: 0, // Size unknown without downloading
+            filepath: '', // No filepath without downloading
+            videoUrl: videoUri // Include the video URL
+          };
+          
+          // Save the metadata
+          await this.saveMetadata(id, metadata);
+          
+          return metadata;
+        }
       });
       
-      // Wait for all videos to be downloaded and saved
+      // Wait for all videos to be processed
       const metadataArray = await Promise.all(videoPromises);
       
       // Filter out any null values (from videos with missing URIs)
       const validMetadata = metadataArray.filter(metadata => metadata !== null);
       
       if (validMetadata.length === 0) {
-        throw new Error('Failed to save any videos');
+        throw new Error('Failed to process any videos');
       }
       
       // Return the first video's metadata
-      return validMetadata[0] as StoredVideoMetadata;
+      const result = validMetadata[0] as StoredVideoMetadata & { videoUrl?: string };
+      
+      // If we didn't download but have a URL, include it in the result
+      if (!autoDownload && result.videoUrl) {
+        return result;
+      }
+      
+      // If includeFullData is true and we downloaded the video, include the video data
+      if (includeFullData && autoDownload && result.filepath) {
+        const videoData = await fs.readFile(result.filepath);
+        return {
+          ...result,
+          videoData: videoData.toString('base64')
+        };
+      }
+      
+      return result;
     } catch (error) {
       log.error('Error generating video from text:', error);
       throw error;
@@ -202,20 +321,30 @@ export class VeoClient {
   /**
    * Generates a video from an image
    * 
-   * @param imageBytes Base64-encoded image data
+   * @param image The image input (base64 data, file path, or URL)
    * @param prompt Optional text prompt for video generation
    * @param config Optional configuration for video generation
-   * @returns Metadata for the generated video
+   * @param options Optional generation options
+   * @param mimeType The MIME type of the image (optional, detected for files and URLs)
+   * @returns Metadata for the generated video and optionally the video data
    */
   async generateFromImage(
-    imageBytes: string,
+    image: string,
     prompt?: string,
     config?: VideoConfig,
-    mimeType: string = 'image/png'
-  ): Promise<StoredVideoMetadata> {
+    options?: VideoGenerationOptions,
+    mimeType?: string
+  ): Promise<StoredVideoMetadata & { videoData?: string, videoUrl?: string }> {
     try {
       log.info('Generating video from image');
-      log.verbose('Image prompt parameters:', JSON.stringify({ prompt, config, mimeType }));
+      log.verbose('Image prompt parameters:', JSON.stringify({ prompt, config, options, mimeType }));
+      
+      // Default options
+      const autoDownload = options?.autoDownload !== false; // Default to true if not specified
+      const includeFullData = options?.includeFullData === true; // Default to false if not specified
+      
+      // Default prompt
+      prompt = prompt || 'Generate a video from this image';
       
       // Create generation config
       const generateConfig: Record<string, any> = {};
@@ -236,14 +365,13 @@ export class VeoClient {
       if (config?.durationSeconds) {
         generateConfig.durationSeconds = config.durationSeconds;
       }
-      
-      if (config?.enhancePrompt !== undefined) {
-        generateConfig.enhancePrompt = config.enhancePrompt;
-      }
-      
+            
       if (config?.negativePrompt) {
         generateConfig.negativePrompt = config.negativePrompt;
       }
+      
+      // Process the image input
+      const { imageBytes, mimeType: detectedMimeType } = await this.processImageInput(image, mimeType);
       
       // Initialize request parameters with the image
       const requestParams = {
@@ -251,7 +379,7 @@ export class VeoClient {
         prompt: prompt || 'Generate a video from this image',
         image: {
           imageBytes: imageBytes,
-          mimeType: mimeType
+          mimeType: detectedMimeType
         },
         config: generateConfig
       };
@@ -279,7 +407,7 @@ export class VeoClient {
         throw new Error('No videos generated in the response');
       }
       
-      // Download each video
+      // Process each video
       const videoPromises = operation.response.generatedVideos.map(async (generatedVideo, index) => {
         if (!generatedVideo.video?.uri) {
           log.warn('Generated video missing URI');
@@ -288,37 +416,76 @@ export class VeoClient {
         
         // Append API key to the URI - use the imported config module
         const videoUri = `${generatedVideo.video.uri}&key=${appConfig.GOOGLE_API_KEY}`;
-        log.debug(`Fetching video ${index + 1} from URI`);
-        
-        // Fetch the video
-        const response = await fetch(videoUri);
-        if (!response.ok) {
-          throw new Error(`Failed to fetch video: ${response.status} ${response.statusText}`);
-        }
-        
-        // Convert the response to a buffer
-        const arrayBuffer = await response.arrayBuffer();
-        const buffer = Buffer.from(arrayBuffer);
+        log.debug(`Processing video ${index + 1} from URI`);
         
         // Generate a unique ID for the video
         const id = index === 0 ? uuidv4() : `${uuidv4()}_${index}`;
         
-        // Save the video to disk
-        return this.saveVideoBuffer(buffer, prompt, config, id);
+        if (autoDownload) {
+          // Fetch the video
+          const response = await fetch(videoUri);
+          if (!response.ok) {
+            throw new Error(`Failed to fetch video: ${response.status} ${response.statusText}`);
+          }
+          
+          // Convert the response to a buffer
+          const arrayBuffer = await response.arrayBuffer();
+          const buffer = Buffer.from(arrayBuffer);
+          
+          // Save the video to disk
+          return this.saveVideoBuffer(buffer, prompt, config, id);
+        } else {
+          // Just return metadata with the URL
+          const metadata: StoredVideoMetadata = {
+            id,
+            createdAt: new Date().toISOString(),
+            prompt,
+            config: {
+              aspectRatio: config?.aspectRatio || '16:9',
+              personGeneration: config?.personGeneration || 'dont_allow',
+              durationSeconds: config?.durationSeconds || 5
+            },
+            mimeType: 'video/mp4',
+            size: 0, // Size unknown without downloading
+            filepath: '', // No filepath without downloading
+            videoUrl: videoUri // Include the video URL
+          };
+          
+          // Save the metadata
+          await this.saveMetadata(id, metadata);
+          
+          return metadata;
+        }
       });
       
-      // Wait for all videos to be downloaded and saved
+      // Wait for all videos to be processed
       const metadataArray = await Promise.all(videoPromises);
       
       // Filter out any null values (from videos with missing URIs)
       const validMetadata = metadataArray.filter(metadata => metadata !== null);
       
       if (validMetadata.length === 0) {
-        throw new Error('Failed to save any videos');
+        throw new Error('Failed to process any videos');
       }
       
       // Return the first video's metadata
-      return validMetadata[0] as StoredVideoMetadata;
+      const result = validMetadata[0] as StoredVideoMetadata & { videoUrl?: string };
+      
+      // If we didn't download but have a URL, include it in the result
+      if (!autoDownload && result.videoUrl) {
+        return result;
+      }
+      
+      // If includeFullData is true and we downloaded the video, include the video data
+      if (includeFullData && autoDownload && result.filepath) {
+        const videoData = await fs.readFile(result.filepath);
+        return {
+          ...result,
+          videoData: videoData.toString('base64')
+        };
+      }
+      
+      return result;
     } catch (error) {
       log.error('Error generating video from image:', error);
       throw error;
@@ -394,12 +561,24 @@ export class VeoClient {
    * Gets a video by ID
    * 
    * @param id The video ID
+   * @param options Optional options for getting the video
    * @returns The video data and metadata
    */
-  async getVideo(id: string): Promise<{ data: Buffer; metadata: StoredVideoMetadata }> {
+  async getVideo(
+    id: string,
+    options?: { includeFullData?: boolean }
+  ): Promise<{ data?: Buffer; metadata: StoredVideoMetadata; videoData?: string }> {
     try {
       // Get the metadata
       const metadata = await this.getMetadata(id);
+      
+      // Default options
+      const includeFullData = options?.includeFullData === true; // Default to false if not specified
+      
+      // If includeFullData is false, just return the metadata
+      if (!includeFullData) {
+        return { metadata };
+      }
       
       // Get the video data - use the filepath from metadata if available
       let filePath: string;
@@ -416,6 +595,15 @@ export class VeoClient {
       }
       
       const data = await fs.readFile(filePath);
+      
+      // If includeFullData is true, include the base64 data
+      if (includeFullData) {
+        return { 
+          metadata, 
+          data,
+          videoData: data.toString('base64')
+        };
+      }
       
       return { data, metadata };
     } catch (error) {

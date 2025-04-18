@@ -137,3 +137,4 @@ dist
 src/standalone_python.py
 src/example_videofromimage.ts
 src/standalone_typescript.ts
+/generated-videos
