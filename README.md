@@ -35,10 +35,10 @@ This project implements a Model Context Protocol (MCP) server that exposes Googl
 
 ### Installing via Smithery
 
-To install mcp-video-generation-veo2 for Claude Desktop automatically via [Smithery](https://smithery.ai/server/@mario-andreschak/mcp-video-generation-veo2):
+To install mcp-video-generation-veo2 for Claude Desktop automatically via [Smithery](https://smithery.ai/server/@mario-andreschak/mcp-veo2):
 
 ```bash
-npx -y @smithery/cli install @mario-andreschak/mcp-video-generation-veo2 --client claude
+npx -y @smithery/cli install @mario-andreschak/mcp-veo2 --client claude
 ```
 
 ### Manual Installation
