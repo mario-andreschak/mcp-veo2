@@ -12,12 +12,26 @@ This project implements a Model Context Protocol (MCP) server that exposes Googl
 - Example video generation templates
 - Support for both stdio and SSE transports
 
+## Example Images
+![Download](https://github.com/user-attachments/assets/b7997639-9dd6-4cef-af61-6680412dc300)
+
+## Example Image to Video
+[Text to Image to Video](https://github.com/mario-andreschak/mcp-veo2/raw/refs/heads/main/example-files/2a6a0807-d323-4424-a48a-e40a82b883bb.mp4)
+
+[Image to Video](https://github.com/mario-andreschak/mcp-veo2/raw/refs/heads/main/example-files/55b9f28b-61a6-423e-bb86-f3791c639177.mp4)
+
+
 ## Prerequisites
 
 - Node.js 18 or higher
-- Google API key with access to Gemini API and Veo2 model
+- Google API key with access to Gemini API and Veo2 model (= You need to set up a credit card with your API key! -> Go to aistudio.google.com )
 
 ## Installation
+
+### Installing in FLUJO
+1. Click Add Server
+2. Copy & Paste Github URL into FLUJO
+3. Click Parse, Clone, Install, Build and Save.
 
 ### Installing via Smithery
 
