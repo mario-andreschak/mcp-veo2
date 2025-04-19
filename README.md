@@ -6,8 +6,8 @@ This project implements a Model Context Protocol (MCP) server that exposes Googl
 
 ## Features
 
-- Generate videos from text prompts
-- Generate videos from images
+- Generate **videos from text** prompts
+- Generate **videos from images**
 - Access generated videos through MCP resources
 - Example video generation templates
 - Support for both stdio and SSE transports
