@@ -13,12 +13,13 @@ This project implements a Model Context Protocol (MCP) server that exposes Googl
 - Support for both stdio and SSE transports
 
 ## Example Images
-![Download](https://github.com/user-attachments/assets/b7997639-9dd6-4cef-af61-6680412dc300)
+![1dec9c71-07dc-4a6e-9e17-8da355d72ba1](https://github.com/user-attachments/assets/ba987d14-dd46-49ac-9b31-1ce398e86c6f)
+
 
 ## Example Image to Video
-[Text to Image to Video](https://github.com/mario-andreschak/mcp-veo2/raw/refs/heads/main/example-files/2a6a0807-d323-4424-a48a-e40a82b883bb.mp4)
+[Image to Video - from Grok generated puppy](https://github.com/mario-andreschak/mcp-veo2/raw/refs/heads/main/example-files/2a6a0807-d323-4424-a48a-e40a82b883bb.mp4)
 
-[Image to Video](https://github.com/mario-andreschak/mcp-veo2/raw/refs/heads/main/example-files/55b9f28b-61a6-423e-bb86-f3791c639177.mp4)
+[Image to Video - from real cat](https://github.com/mario-andreschak/mcp-veo2/raw/refs/heads/main/example-files/55b9f28b-61a6-423e-bb86-f3791c639177.mp4)
 
 
 ## Prerequisites
