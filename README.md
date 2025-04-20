@@ -4,6 +4,10 @@
 
 This project implements a Model Context Protocol (MCP) server that exposes Google's Veo2 video generation capabilities. It allows clients to generate videos from text prompts or images, and access the generated videos through MCP resources.
 
+<a href="https://glama.ai/mcp/servers/@mario-andreschak/mcp-veo2">
+  <img width="380" height="200" src="https://glama.ai/mcp/servers/@mario-andreschak/mcp-veo2/badge" alt="Video Generation with Veo2 MCP server" />
+</a>
+
 ## Features
 
 - Generate **videos from text** prompts
