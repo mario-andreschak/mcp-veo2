@@ -29,7 +29,7 @@ This project implements a Model Context Protocol (MCP) server that exposes Googl
 
 ## Installation
 
-### Installing in FLUJO
+### Installing in [FLUJO](https://github.com/mario-andreschak/FLUJO/)
 1. Click Add Server
 2. Copy & Paste Github URL into FLUJO
 3. Click Parse, Clone, Install, Build and Save.
