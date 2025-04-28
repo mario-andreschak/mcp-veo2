@@ -161,7 +161,7 @@ export function createServer(): McpServer {
     {
       prompt: z.string().min(1).max(1000),
       numberOfImages: z.number().min(1).max(4).default(1),
-      includeFullData: z.union([z.boolean(), z.string()]).default(true),
+      includeFullData: z.union([z.boolean(), z.string()]).default(false),
     },
     generateImage
   );
