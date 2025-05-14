@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/mario-andreschak-mcp-veo2-badge.png)](https://mseep.ai/app/mario-andreschak-mcp-veo2)
+
 # MCP Video Generation with Veo2
 
 [![smithery badge](https://smithery.ai/badge/@mario-andreschak/mcp-video-generation-veo2)](https://smithery.ai/server/@mario-andreschak/mcp-video-generation-veo2)
