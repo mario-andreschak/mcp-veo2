@@ -1,96 +1,49 @@
-import express from 'express';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
-import { createServer } from './server.js';
-import config from './config.js';
-import { log } from './utils/logger.js';
-import fs from 'fs/promises';
-import path from 'path';
+#!/usr/bin/env node
+import { serveStdio } from "@modelcontextprotocol/server/stdio";
+import { loadConfig } from "./config.js";
+import { MediaStore } from "./services/veoClient.js";
+import { createServer } from "./server.js";
+import { startHttp } from "./http.js";
 
-/**
- * Main entry point for the MCP server
- */
 async function main() {
-  try {
-    // Create the MCP server
-    const server = createServer();
-    
-    // Determine the transport type from command line arguments
-    const transportType = process.argv[2] || 'stdio';
-    
-    // Ensure the storage directory exists
-    await fs.mkdir(config.STORAGE_DIR, { recursive: true });
-    
-    if (transportType === 'stdio') {
-      // Use stdio transport
-      log.info('Starting server with stdio transport');
-      
-      const transport = new StdioServerTransport();
-      await server.connect(transport);
-      
-      log.info('Server started with stdio transport');
-    } else if (transportType === 'sse') {
-      // Use SSE transport
-      log.info(`Starting server with SSE transport on port ${config.PORT}`);
-      
-      const app = express();
-      const port = config.PORT;
-      
-      // Store active SSE transports
-      const transports: Record<string, SSEServerTransport> = {};
-      
-      // Serve static files from the generated-videos directory
-      app.use('/videos', express.static(config.STORAGE_DIR));
-      
-      // SSE endpoint
-      app.get('/sse', (req, res) => {
-        log.info('New SSE connection');
-        
-        const transport = new SSEServerTransport('/messages', res);
-        transports[transport.sessionId] = transport;
-        
-        res.on('close', () => {
-          log.info(`SSE connection closed: ${transport.sessionId}`);
-          delete transports[transport.sessionId];
-        });
-        
-        server.connect(transport).catch(err => {
-          log.error('Error connecting transport:', err);
-        });
-      });
-      
-      // Message endpoint
-      app.post('/messages', express.json(), (req, res) => {
-        const sessionId = req.query.sessionId as string;
-        const transport = transports[sessionId];
-        
-        if (transport) {
-          transport.handlePostMessage(req, res).catch(err => {
-            log.error(`Error handling message for session ${sessionId}:`, err);
-          });
-        } else {
-          res.status(404).send('Session not found');
-        }
-      });
-      
-      // Start the server
-      app.listen(port, () => {
-        log.info(`Server started with SSE transport on port ${port}`);
-        log.info(`Connect to http://localhost:${port}/sse`);
-      });
-    } else {
-      log.fatal(`Unknown transport type: ${transportType}`);
-      log.info('Usage: npm start [stdio|sse]');
-      process.exit(1);
-    }
-  } catch (error) {
-    log.fatal('Error starting server:', error);
-    process.exit(1);
-  }
+  const config = loadConfig();
+  const store = new MediaStore(config);
+  await store.initialize();
+  const mode = process.argv[2] ?? "stdio";
+  if (!["stdio", "http", "sse"].includes(mode))
+    throw new Error("Usage: mcp-video-generation-veo2 [stdio|http|sse]");
+  const handle =
+    mode === "stdio"
+      ? serveStdio(() => createServer(config, store), {
+          onerror: () => console.error("MCP transport error"),
+        })
+      : await startHttp(config, store);
+  if ("port" in handle)
+    console.error(
+      "MCP HTTP listening on port " +
+        handle.port +
+        "; open / for the browser connection check",
+    );
+  let closing = false;
+  const close = async () => {
+    if (closing) return;
+    closing = true;
+    await handle.close();
+  };
+  process.once("SIGINT", () => {
+    void close();
+  });
+  process.once("SIGTERM", () => {
+    void close();
+  });
+  if (mode === "stdio")
+    process.stdin.once("end", () => {
+      void close();
+    });
 }
-
-// Start the server
-main().catch(err => {
-  log.fatal('Unhandled error:', err);
-  process.exit(1);
+main().catch(() => {
+  console.error(
+    "Startup failed: check transport, numeric settings, storage permissions and MCP_AUTH_TOKEN (24+ characters for HTTP)",
+  );
+  process.exitCode = 1;
 });

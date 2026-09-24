@@ -10,7 +10,7 @@ startCommand:
     properties:
       googleApiKey:
         type: string
-        description: Your Google API key for accessing the Gemini and Veo2 services.
+        description: Your Google API key for accessing the Gemini and Veo services.
       port:
         type: number
         default: 3000
@@ -27,8 +27,8 @@ startCommand:
     # A JS function that produces the CLI command based on the given config to start the MCP on stdio.
     |-
     (config) => ({
-      command: 'npm',
-      args: ['start'],
+      command: 'node',
+      args: ['dist/index.js'],
       env: {
         GOOGLE_API_KEY: config.googleApiKey,
         PORT: config.port ? String(config.port) : '3000',

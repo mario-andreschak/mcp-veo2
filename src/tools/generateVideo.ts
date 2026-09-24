@@ -1,745 +1,260 @@
-import { z } from 'zod';
-import { GoogleGenAI } from '@google/genai';
-import { veoClient } from '../services/veoClient.js';
-import { CallToolResult, ImageContent, TextContent } from '@modelcontextprotocol/sdk/types.js';
-import { log } from '../utils/logger.js';
-import appConfig from '../config.js';
-import fs from 'fs/promises';
-import path from 'path';
-import { v4 as uuidv4 } from 'uuid';
+import {
+  McpServer,
+  type CallToolResult,
+  type ServerContext,
+  type ContentBlock,
+} from "@modelcontextprotocol/server";
+import { z } from "zod";
+import type { Config } from "../config.js";
+import {
+  MediaStore,
+  VeoClient,
+  type Kind,
+  type Media,
+} from "../services/veoClient.js";
 
-// Initialize the Google Gen AI client for image generation
-const ai = new GoogleGenAI({ apiKey: appConfig.GOOGLE_API_KEY });
-
-// Define the storage directory for generated images
-const IMAGE_STORAGE_DIR = path.join(appConfig.STORAGE_DIR, 'images');
-
-// Ensure the image storage directory exists
-(async () => {
-  try {
-    await fs.mkdir(IMAGE_STORAGE_DIR, { recursive: true });
-  } catch (error) {
-    log.fatal('Failed to create image storage directory:', error);
-    process.exit(1);
-  }
-})();
-
-/**
- * Saves a generated image to disk
- * 
- * @param imageBytes The base64 encoded image data
- * @param prompt The prompt used to generate the image
- * @param mimeType The MIME type of the image
- * @returns The filepath and ID of the saved image
- */
-async function saveGeneratedImage(
-  imageBytes: string,
-  prompt: string,
-  mimeType: string = 'image/png'
-): Promise<{ id: string; filepath: string }> {
-  try {
-    // Generate a unique ID for the image
-    const id = uuidv4();
-    
-    // Determine the file extension based on MIME type
-    let extension = '.png';
-    if (mimeType === 'image/jpeg' || mimeType === 'image/jpg') {
-      extension = '.jpg';
-    } else if (mimeType === 'image/webp') {
-      extension = '.webp';
-    }
-    
-    // Create the file path
-    const filepath = path.resolve(IMAGE_STORAGE_DIR, `${id}${extension}`);
-    
-    // Convert base64 to buffer and save to disk
-    const buffer = Buffer.from(imageBytes, 'base64');
-    await fs.writeFile(filepath, buffer);
-    
-    // Save metadata
-    const metadata = {
-      id,
-      createdAt: new Date().toISOString(),
-      prompt,
-      mimeType,
-      size: buffer.length,
-      filepath
-    };
-    
-    const metadataPath = path.resolve(IMAGE_STORAGE_DIR, `${id}.json`);
-    await fs.writeFile(metadataPath, JSON.stringify(metadata, null, 2));
-    
-    log.info(`Image saved successfully with ID: ${id}`);
-    return { id, filepath };
-  } catch (error) {
-    log.error('Error saving generated image:', error);
-    throw error;
-  }
-}
-
-// Define schemas for tool inputs
-const AspectRatioSchema = z.enum(['16:9', '9:16']);
-const PersonGenerationSchema = z.enum(['dont_allow', 'allow_adult']);
-
-/**
- * Tool for generating a video from a text prompt
- * 
- * @param args The tool arguments
- * @returns The tool result
- */
-export async function generateVideoFromText(args: {
-  prompt: string;
-  aspectRatio?: '16:9' | '9:16';
-  personGeneration?: 'dont_allow' | 'allow_adult';
-  numberOfVideos?: 1 | 2;
-  durationSeconds?: number;
-  enhancePrompt?: boolean | string;
-  negativePrompt?: string;
-  includeFullData?: boolean | string;
-  autoDownload?: boolean | string;
-}): Promise<CallToolResult> {
-  try {
-    log.info('Generating video from text prompt');
-    log.verbose('Text prompt parameters:', JSON.stringify(args));
-    
-    // Convert string boolean parameters to actual booleans
-    const enhancePrompt = typeof args.enhancePrompt === 'string'
-      ? args.enhancePrompt.toLowerCase() === 'true' || args.enhancePrompt === '1'
-      : args.enhancePrompt ?? false;
-      
-    const includeFullData = typeof args.includeFullData === 'string'
-      ? args.includeFullData.toLowerCase() === 'true' || args.includeFullData === '1'
-      : args.includeFullData ?? false;
-      
-    const autoDownload = typeof args.autoDownload === 'string'
-      ? args.autoDownload.toLowerCase() === 'true' || args.autoDownload === '1'
-      : args.autoDownload ?? true;
-    
-    // Create config object from individual parameters with defaults
-    const config = {
-      aspectRatio: args.aspectRatio || '16:9',
-      personGeneration: args.personGeneration || 'dont_allow',
-      numberOfVideos: args.numberOfVideos || 1,
-      durationSeconds: args.durationSeconds || 5,
-      enhancePrompt: enhancePrompt,
-      negativePrompt: args.negativePrompt || ''
-    };
-
-    // Options for video generation with defaults
-    const options = {
-      includeFullData: includeFullData,
-      autoDownload: autoDownload
-    };
-    
-    // Generate the video
-    const result = await veoClient.generateFromText(args.prompt, config, options);
-    
-    // Prepare response content
-    const responseContent: Array<TextContent | ImageContent> = [];
-    
-    // If includeFullData is true and we have video data, include it in the response
-    if (args.includeFullData && result.videoData) {
-      responseContent.push({
-        type: 'image', // Use 'image' type for video content since MCP doesn't have a 'video' type
-        mimeType: result.mimeType,
-        data: result.videoData
-      });
-    }
-    
-    // Add text content with metadata
-    responseContent.push({
-      type: 'text',
-      text: JSON.stringify({
-        success: true,
-        message: 'Video generated successfully',
-        videoId: result.id,
-        resourceUri: `videos://${result.id}`,
-        filepath: result.filepath,
-        videoUrl: result.videoUrl,
-        metadata: result
-      }, null, 2)
-    });
-    
-    // Return the result
-    return {
-      content: responseContent
-    };
-  } catch (error) {
-    log.error('Error generating video from text:', error);
-    
-    // Return the error
-    return {
-      isError: true,
-      content: [
-        {
-          type: 'text',
-          text: `Error generating video: ${error instanceof Error ? error.message : String(error)}`
-        }
-      ]
-    };
-  }
-}
-
-/**
- * Tool for generating a video from an image
- * 
- * @param args The tool arguments
- * @returns The tool result
- */
-export async function generateVideoFromImage(args: {
-  image: string | { type: 'image'; mimeType: string; data: string };
-  prompt?: string;
-  aspectRatio?: '16:9' | '9:16';
-  numberOfVideos?: 1 | 2;
-  durationSeconds?: number;
-  enhancePrompt?: boolean | string;
-  negativePrompt?: string;
-  includeFullData?: boolean | string;
-  autoDownload?: boolean | string;
-}): Promise<CallToolResult> {
-  try {
-    log.info('Generating video from image');
-    log.verbose('Image parameters:', JSON.stringify(args));
-    
-    // Extract image data based on the type
-    let imageData: string;
-    let mimeType: string | undefined;
-    
-    if (typeof args.image === 'string') {
-      // It's a URL or file path
-      imageData = args.image;
-    } else {
-      // It's an ImageContent object
-      imageData = args.image.data;
-      mimeType = args.image.mimeType;
-    }
-    
-    // Convert string boolean parameters to actual booleans
-    const enhancePrompt = typeof args.enhancePrompt === 'string'
-      ? args.enhancePrompt.toLowerCase() === 'true' || args.enhancePrompt === '1'
-      : args.enhancePrompt ?? false;
-      
-    const includeFullData = typeof args.includeFullData === 'string'
-      ? args.includeFullData.toLowerCase() === 'true' || args.includeFullData === '1'
-      : args.includeFullData ?? false;
-      
-    const autoDownload = typeof args.autoDownload === 'string'
-      ? args.autoDownload.toLowerCase() === 'true' || args.autoDownload === '1'
-      : args.autoDownload ?? true;
-    
-    // Create config object from individual parameters with defaults
-    const config = {
-      aspectRatio: args.aspectRatio || '16:9',
-      numberOfVideos: args.numberOfVideos || 1,
-      durationSeconds: args.durationSeconds || 5,
-      enhancePrompt: enhancePrompt,
-      negativePrompt: args.negativePrompt || ''
-    };
-
-    // Options for video generation with defaults
-    const options = {
-      includeFullData: includeFullData,
-      autoDownload: autoDownload
-    };
-    
-    // Generate the video
-    const result = await veoClient.generateFromImage(
-      imageData, 
-      args.prompt, 
-      config,
-      options,
-      mimeType
+const bool = z
+  .union([z.boolean(), z.enum(["true", "false", "1", "0"])])
+  .transform((v) => v === true || v === "true" || v === "1");
+const videoFields = {
+  aspectRatio: z.enum(["16:9", "9:16"]).default("16:9"),
+  durationSeconds: z
+    .union([z.literal(4), z.literal(6), z.literal(8)])
+    .default(8),
+  numberOfVideos: z.literal(1).default(1),
+  personGeneration: z.enum(["allow_all", "allow_adult"]).optional(),
+  resolution: z.enum(["720p", "1080p", "4k"]).default("720p"),
+  negativePrompt: z.string().max(2000).optional(),
+  enhancePrompt: bool
+    .pipe(z.literal(false))
+    .default(false)
+    .describe("Deprecated; only false is accepted"),
+  autoDownload: bool
+    .pipe(z.literal(true))
+    .default(true)
+    .describe("Media must be downloaded server-side; only true is accepted"),
+  includeFullData: bool.default(false),
+};
+const prompt = z.string().min(1).max(4000);
+export async function mediaResult(
+  store: MediaStore,
+  kind: Kind,
+  item: Media,
+  inline: boolean,
+): Promise<CallToolResult> {
+  const content: ContentBlock[] = [
+    {
+      type: "resource_link",
+      uri: item.resourceUri,
+      name: item.id,
+      mimeType: item.mimeType,
+    },
+  ];
+  if (inline) {
+    const { bytes } = await store.bytes(kind, item.id, 8 * 1024 * 1024);
+    content.push(
+      kind === "images"
+        ? {
+            type: "image",
+            mimeType: item.mimeType,
+            data: bytes.toString("base64"),
+          }
+        : {
+            type: "resource",
+            resource: {
+              uri: item.resourceUri,
+              mimeType: item.mimeType,
+              blob: bytes.toString("base64"),
+            },
+          },
     );
-    
-    // Prepare response content
-    const responseContent: Array<TextContent | ImageContent> = [];
-    
-    // If includeFullData is true and we have video data, include it in the response
-    if (args.includeFullData && result.videoData) {
-      responseContent.push({
-        type: 'image', // Use 'image' type for video content since MCP doesn't have a 'video' type
-        mimeType: result.mimeType,
-        data: result.videoData
-      });
-    }
-    
-    // Add text content with metadata
-    responseContent.push({
-      type: 'text',
-      text: JSON.stringify({
-        success: true,
-        message: 'Video generated successfully',
-        videoId: result.id,
-        resourceUri: `videos://${result.id}`,
-        filepath: result.filepath,
-        videoUrl: result.videoUrl,
-        metadata: result
-      }, null, 2)
-    });
-    
-    // Return the result
-    return {
-      content: responseContent
-    };
-  } catch (error) {
-    log.error('Error generating video from image:', error);
-    
-    // Return the error
-    return {
-      isError: true,
-      content: [
-        {
-          type: 'text',
-          text: `Error generating video: ${error instanceof Error ? error.message : String(error)}`
-        }
-      ]
-    };
   }
+  content.push({ type: "text", text: JSON.stringify(item) });
+  return { content, structuredContent: { ...item } };
 }
-
-/**
- * Tool for generating an image from a text prompt
- * 
- * @param args The tool arguments
- * @returns The tool result with generated image
- */
-export async function generateImage(args: {
-  prompt: string;
-  numberOfImages?: number;
-  includeFullData?: boolean | string;
-}): Promise<CallToolResult> {
-  try {
-    log.info('Generating image from text prompt');
-    log.verbose('Image generation parameters:', JSON.stringify(args));
-    
-    // Create config object
-    const config = {
-      numberOfImages: args.numberOfImages || 1
-    };
-    
-    // Generate the image using Imagen
-    const response = await ai.models.generateImages({
-      model: "imagen-3.0-generate-002",
-      prompt: args.prompt,
-      config: config,
-    });
-    
-    if (!response.generatedImages || response.generatedImages.length === 0) {
-      throw new Error('No images generated in the response');
-    }
-    
-    const generatedImage = response.generatedImages[0];
-    
-    if (!generatedImage.image?.imageBytes) {
-      throw new Error('Generated image missing image bytes');
-    }
-    
-    // Save the generated image to disk
-    const { id, filepath } = await saveGeneratedImage(
-      generatedImage.image.imageBytes,
-      args.prompt,
-      'image/png'
+export function registerTools(
+  server: McpServer,
+  config: Config,
+  store: MediaStore,
+  provider: VeoClient,
+) {
+  function register(
+    name: string,
+    description: string,
+    schema: z.ZodType,
+    run: (args: any, signal: AbortSignal) => Promise<CallToolResult>,
+    readOnly = false,
+  ) {
+    server.registerTool(
+      name,
+      {
+        description,
+        inputSchema: schema,
+        annotations: {
+          readOnlyHint: readOnly,
+          destructiveHint: false,
+          idempotentHint: readOnly,
+          openWorldHint: !readOnly,
+        },
+      },
+      async (args: any, ctx: ServerContext) => {
+        const signal = AbortSignal.any([
+          ctx.mcpReq.signal,
+          AbortSignal.timeout(config.deadlineMs),
+        ]);
+        try {
+          return await run(args, signal);
+        } catch (error) {
+          // Provider bodies, URLs and original Error objects can contain credentials.
+          const message = signal.aborted
+            ? "Operation cancelled or generation deadline exceeded. Provider work may still incur charges."
+            : error instanceof Error &&
+                !error.message.includes(config.apiKey || "\u0000") &&
+                !/https?:|[\\/](?:workspace|home|Users)/i.test(error.message)
+              ? error.message
+              : "Media operation failed; check server configuration and provider access";
+          return { isError: true, content: [{ type: "text", text: message }] };
+        }
+      },
     );
-    
-    // Prepare response content
-    const responseContent: Array<TextContent | ImageContent> = [];
-    
-    // Convert includeFullData to boolean if it's a string
-    const includeFullData = typeof args.includeFullData === 'string'
-      ? args.includeFullData.toLowerCase() === 'true' || args.includeFullData === '1'
-      : args.includeFullData !== false;
-    
-    // If includeFullData is true (default) or not specified, include the image data
-    if (includeFullData) {
-      responseContent.push({
-        type: 'image',
-        mimeType: 'image/png',
-        data: generatedImage.image.imageBytes
+  }
+  function validateVideo(args: any, image: boolean) {
+    if (args.resolution !== "720p" && args.durationSeconds !== 8)
+      throw new Error("1080p and 4k require durationSeconds=8");
+    if (
+      args.personGeneration &&
+      args.personGeneration !== (image ? "allow_adult" : "allow_all")
+    )
+      throw new Error(
+        image
+          ? "Image-to-video requires personGeneration=allow_adult"
+          : "Text-to-video requires personGeneration=allow_all",
+      );
+  }
+  register(
+    "generateVideoFromText",
+    "Generate one video using the configured Google Veo model. This incurs provider charges.",
+    z.object({ prompt, ...videoFields }).strict(),
+    async (args, signal) => {
+      validateVideo(args, false);
+      const item = await provider.generateVideo(args.prompt, args, signal);
+      return mediaResult(store, "videos", item, args.includeFullData);
+    },
+  );
+  register(
+    "generateVideoFromImage",
+    "Animate an image using Veo. URLs require IMAGE_URL_HOSTS; files must be inside IMAGE_INPUT_DIR.",
+    z
+      .object({
+        prompt: prompt.default("Animate this image"),
+        image: z.union([
+          z
+            .string()
+            .min(1)
+            .max(14 * 1024 * 1024),
+          z.object({
+            type: z.literal("image").optional(),
+            data: z.string().max(14 * 1024 * 1024),
+            mimeType: z.enum(["image/png", "image/jpeg", "image/webp"]),
+          }),
+        ]),
+        ...videoFields,
+      })
+      .strict(),
+    async (args, signal) => {
+      validateVideo(args, true);
+      const item = await provider.generateVideo(
+        args.prompt,
+        args,
+        signal,
+        args.image,
+      );
+      return mediaResult(store, "videos", item, args.includeFullData);
+    },
+  );
+  register(
+    "generateImage",
+    "Generate one image using the configured Gemini image model. This incurs provider charges.",
+    z
+      .object({
+        prompt,
+        numberOfImages: z.literal(1).default(1),
+        includeFullData: bool.default(false),
+      })
+      .strict(),
+    async (args, signal) =>
+      mediaResult(
+        store,
+        "images",
+        await provider.generateImage(args.prompt, signal),
+        args.includeFullData,
+      ),
+  );
+  register(
+    "generateVideoFromGeneratedImage",
+    "Generate one Gemini image then animate it with Veo. Both steps incur provider charges.",
+    z
+      .object({
+        prompt,
+        videoPrompt: prompt.optional(),
+        numberOfImages: z.literal(1).default(1),
+        ...videoFields,
+      })
+      .strict(),
+    async (args, signal) => {
+      validateVideo(args, true);
+      const image = await provider.generateImage(args.prompt, signal);
+      const { bytes } = await store.bytes("images", image.id, 10 * 1024 * 1024);
+      const video = await provider.generateVideo(
+        args.videoPrompt ?? args.prompt,
+        args,
+        signal,
+        { data: bytes.toString("base64"), mimeType: image.mimeType },
+      );
+      const result = await mediaResult(
+        store,
+        "videos",
+        video,
+        args.includeFullData,
+      );
+      result.content.unshift({
+        type: "resource_link",
+        uri: image.resourceUri,
+        name: image.id,
+        mimeType: image.mimeType,
       });
-    }
-    
-    // Add text content with metadata
-    responseContent.push({
-      type: 'text',
-      text: JSON.stringify({
-        success: true,
-        message: 'Image generated successfully',
-        imageId: id,
-        resourceUri: `images://${id}`,
-        filepath: filepath
-      }, null, 2)
-    });
-    
-    // Return the result
-    return {
-      content: responseContent
-    };
-  } catch (error) {
-    log.error('Error generating image:', error);
-    
-    // Return the error
-    return {
-      isError: true,
-      content: [
-        {
-          type: 'text',
-          text: `Error generating image: ${error instanceof Error ? error.message : String(error)}`
-        }
-      ]
-    };
-  }
-}
-
-/**
- * Tool for generating a video from a generated image
- * 
- * @param args The tool arguments
- * @returns The tool result
- */
-export async function generateVideoFromGeneratedImage(args: {
-  prompt: string;
-  videoPrompt?: string;
-  // Image generation parameters
-  numberOfImages?: number;
-  // Video generation parameters
-  aspectRatio?: '16:9' | '9:16';
-  personGeneration?: 'dont_allow' | 'allow_adult';
-  numberOfVideos?: 1 | 2;
-  durationSeconds?: number;
-  enhancePrompt?: boolean | string;
-  negativePrompt?: string;
-  includeFullData?: boolean | string;
-  autoDownload?: boolean | string;
-}): Promise<CallToolResult> {
-  try {
-    log.info('Generating video from generated image');
-    log.verbose('Image generation parameters:', JSON.stringify(args));
-    
-    // Convert string boolean parameters to actual booleans
-    const enhancePrompt = typeof args.enhancePrompt === 'string'
-      ? args.enhancePrompt.toLowerCase() === 'true' || args.enhancePrompt === '1'
-      : args.enhancePrompt ?? false;
-      
-    const includeFullData = typeof args.includeFullData === 'string'
-      ? args.includeFullData.toLowerCase() === 'true' || args.includeFullData === '1'
-      : args.includeFullData ?? false;
-      
-    const autoDownload = typeof args.autoDownload === 'string'
-      ? args.autoDownload.toLowerCase() === 'true' || args.autoDownload === '1'
-      : args.autoDownload ?? true;
-    
-    // Create image config with defaults
-    const imageConfig = {
-      numberOfImages: args.numberOfImages || 1
-    };
-    
-    // Create video config with defaults
-    const videoConfig = {
-      aspectRatio: args.aspectRatio || '16:9',
-      personGeneration: args.personGeneration || 'dont_allow',
-      numberOfVideos: args.numberOfVideos || 1,
-      durationSeconds: args.durationSeconds || 5,
-      enhancePrompt: enhancePrompt,
-      negativePrompt: args.negativePrompt || ''
-    };
-    
-    // Options for video generation with defaults
-    const options = {
-      includeFullData: includeFullData,
-      autoDownload: autoDownload
-    };
-    
-    // First generate the image
-    const imageResponse = await ai.models.generateImages({
-      model: "imagen-3.0-generate-002",
-      prompt: args.prompt,
-      config: imageConfig,
-    });
-    
-    if (!imageResponse.generatedImages || imageResponse.generatedImages.length === 0) {
-      throw new Error('No images generated in the response');
-    }
-    
-    const generatedImage = imageResponse.generatedImages[0];
-    
-    if (!generatedImage.image?.imageBytes) {
-      throw new Error('Generated image missing image bytes');
-    }
-    
-    // Save the generated image to disk
-    const { id: imageId, filepath: imageFilepath } = await saveGeneratedImage(
-      generatedImage.image.imageBytes,
-      args.prompt,
-      'image/png'
+      result.structuredContent = { ...video, image };
+      return result;
+    },
+  );
+  for (const kind of ["videos", "images"] as const)
+    register(
+      kind === "videos" ? "listGeneratedVideos" : "listGeneratedImages",
+      "List saved " + kind,
+      z.object({}).strict(),
+      async () => {
+        const items = await store.list(kind);
+        const data = { count: items.length, [kind]: items };
+        return {
+          content: [{ type: "text", text: JSON.stringify(data) }],
+          structuredContent: data,
+        };
+      },
+      true,
     );
-    
-    // Use the generated image to create a video
-    const videoPrompt = args.videoPrompt || args.prompt;
-    const result = await veoClient.generateFromImage(
-      generatedImage.image.imageBytes,
-      videoPrompt,
-      videoConfig,
-      options,
-      'image/png'
-    );
-    
-    // Prepare response content
-    const responseContent: Array<TextContent | ImageContent> = [];
-    
-    // Always include the generated image
-    responseContent.push({
-      type: 'image',
-      mimeType: 'image/png',
-      data: generatedImage.image.imageBytes
-    });
-    
-    // If includeFullData is true and we have video data, include it in the response
-    if (args.includeFullData && result.videoData) {
-      responseContent.push({
-        type: 'image', // Use 'image' type for video content since MCP doesn't have a 'video' type
-        mimeType: result.mimeType,
-        data: result.videoData
-      });
-    }
-    
-    // Add text content with metadata
-    responseContent.push({
-      type: 'text',
-      text: JSON.stringify({
-        success: true,
-        message: 'Video generated from image successfully',
-        videoId: result.id,
-        videoResourceUri: `videos://${result.id}`,
-        videoFilepath: result.filepath,
-        videoUrl: result.videoUrl,
-        imageId: imageId,
-        imageResourceUri: `images://${imageId}`,
-        imageFilepath: imageFilepath,
-        metadata: result
-      }, null, 2)
-    });
-    
-    // Return the result
-    return {
-      content: responseContent
-    };
-  } catch (error) {
-    log.error('Error generating video from generated image:', error);
-    
-    // Return the error
-    return {
-      isError: true,
-      content: [
-        {
-          type: 'text',
-          text: `Error generating video from generated image: ${error instanceof Error ? error.message : String(error)}`
-        }
-      ]
-    };
-  }
-}
-
-/**
- * Gets image metadata by ID
- * 
- * @param id The image ID
- * @returns The image metadata
- */
-async function getImageMetadata(id: string): Promise<any> {
-  try {
-    const metadataPath = path.resolve(IMAGE_STORAGE_DIR, `${id}.json`);
-    const metadataJson = await fs.readFile(metadataPath, 'utf-8');
-    return JSON.parse(metadataJson);
-  } catch (error) {
-    log.error(`Error getting metadata for image ${id}:`, error);
-    throw new Error(`Image metadata not found: ${id}`);
-  }
-}
-
-/**
- * Tool for getting an image by ID
- * 
- * @param args The tool arguments
- * @returns The tool result
- */
-export async function getImage(args: {
-  id: string;
-  includeFullData?: boolean | string;
-}): Promise<CallToolResult> {
-  try {
-    log.info(`Getting image with ID: ${args.id}`);
-    
-    // Get the image metadata
-    const metadata = await getImageMetadata(args.id);
-    
-    // Convert includeFullData to boolean if it's a string
-    const includeFullData = typeof args.includeFullData === 'string'
-      ? args.includeFullData.toLowerCase() === 'true' || args.includeFullData === '1'
-      : args.includeFullData !== false;
-    
-    // Prepare response content
-    const responseContent: Array<TextContent | ImageContent> = [];
-    
-    // If includeFullData is true (default) or not specified, include the image data
-    if (includeFullData && metadata.filepath) {
-      try {
-        const imageData = await fs.readFile(metadata.filepath);
-        responseContent.push({
-          type: 'image',
-          mimeType: metadata.mimeType || 'image/png',
-          data: imageData.toString('base64')
-        });
-      } catch (error) {
-        log.error(`Error reading image file ${metadata.filepath}:`, error);
-        // Continue without the image data
-      }
-    }
-    
-    // Add text content with metadata
-    responseContent.push({
-      type: 'text',
-      text: JSON.stringify({
-        success: true,
-        message: 'Image retrieved successfully',
-        imageId: metadata.id,
-        resourceUri: `images://${metadata.id}`,
-        filepath: metadata.filepath,
-        prompt: metadata.prompt,
-        createdAt: metadata.createdAt,
-        mimeType: metadata.mimeType,
-        size: metadata.size
-      }, null, 2)
-    });
-    
-    // Return the result
-    return {
-      content: responseContent
-    };
-  } catch (error) {
-    log.error(`Error getting image:`, error);
-    
-    // Return the error
-    return {
-      isError: true,
-      content: [
-        {
-          type: 'text',
-          text: `Error getting image: ${error instanceof Error ? error.message : String(error)}`
-        }
-      ]
-    };
-  }
-}
-
-/**
- * Tool for listing all generated images
- * 
- * @returns The tool result
- */
-export async function listGeneratedImages(): Promise<CallToolResult> {
-  try {
-    log.info('Listing all generated images');
-    
-    // Get all files in the image storage directory
-    const files = await fs.readdir(IMAGE_STORAGE_DIR);
-    
-    // Filter for JSON metadata files
-    const metadataFiles = files.filter(file => file.endsWith('.json'));
-    
-    // Read and parse each metadata file
-    const imagesPromises = metadataFiles.map(async file => {
-      const filePath = path.resolve(IMAGE_STORAGE_DIR, file);
-      try {
-        const metadataJson = await fs.readFile(filePath, 'utf-8');
-        return JSON.parse(metadataJson);
-      } catch (error) {
-        log.error(`Error reading image metadata file ${filePath}:`, error);
-        return null;
-      }
-    });
-    
-    // Wait for all metadata to be read and filter out any null values
-    const images = (await Promise.all(imagesPromises)).filter(image => image !== null);
-    
-    // Return the result
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            success: true,
-            count: images.length,
-            images: images.map(image => ({
-              id: image.id,
-              createdAt: image.createdAt,
-              prompt: image.prompt,
-              resourceUri: `images://${image.id}`,
-              filepath: image.filepath,
-              mimeType: image.mimeType,
-              size: image.size
-            }))
-          }, null, 2)
-        }
-      ]
-    };
-  } catch (error) {
-    log.error('Error listing images:', error);
-    
-    // Return the error
-    return {
-      isError: true,
-      content: [
-        {
-          type: 'text',
-          text: `Error listing images: ${error instanceof Error ? error.message : String(error)}`
-        }
-      ]
-    };
-  }
-}
-
-/**
- * Tool for listing all generated videos
- * 
- * @returns The tool result
- */
-export async function listGeneratedVideos(): Promise<CallToolResult> {
-  try {
-    // Get all videos
-    const videos = await veoClient.listVideos();
-    
-    // Return the result
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            success: true,
-            count: videos.length,
-            videos: videos.map(video => ({
-              id: video.id,
-              createdAt: video.createdAt,
-              prompt: video.prompt,
-              resourceUri: `videos://${video.id}`,
-              filepath: video.filepath,
-              videoUrl: video.videoUrl
-            }))
-          }, null, 2)
-        }
-      ]
-    };
-  } catch (error) {
-    log.error('Error listing videos:', error);
-    
-    // Return the error
-    return {
-      isError: true,
-      content: [
-        {
-          type: 'text',
-          text: `Error listing videos: ${error instanceof Error ? error.message : String(error)}`
-        }
-      ]
-    };
-  }
+  register(
+    "getImage",
+    "Read a saved image by UUID.",
+    z
+      .object({ id: z.string().uuid(), includeFullData: bool.default(true) })
+      .strict(),
+    async (args) =>
+      mediaResult(
+        store,
+        "images",
+        await store.metadata("images", args.id),
+        args.includeFullData,
+      ),
+    true,
+  );
 }

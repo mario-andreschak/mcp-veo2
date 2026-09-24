@@ -1,660 +1,436 @@
-import { GoogleGenAI, GenerateVideosParameters } from '@google/genai';
-import fs from 'fs/promises';
-import path from 'path';
-import { v4 as uuidv4 } from 'uuid';
-import { createWriteStream } from 'fs';
-import { Readable } from 'stream';
-import appConfig from '../config.js';
-import { log } from '../utils/logger.js';
+import fs from "node:fs/promises";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
+import type { Config } from "../config.js";
 
-// Define types for video generation
-interface VideoConfig {
-  aspectRatio?: '16:9' | '9:16';
-  personGeneration?: 'dont_allow' | 'allow_adult';
-  numberOfVideos?: 1 | 2;
-  durationSeconds?: number;
-  negativePrompt?: string;
-}
-
-// Options for video generation
-interface VideoGenerationOptions {
-  autoDownload?: boolean; // Default: true
-  includeFullData?: boolean; // Default: false
-}
-
-// Define types for video generation operation
-interface VideoOperation {
-  done: boolean;
-  response?: {
-    generatedVideos?: Array<{
-      video?: {
-        uri?: string;
-      };
-    }>;
-  };
-}
-
-// Metadata for stored videos
-interface StoredVideoMetadata {
+export type Kind = "videos" | "images";
+export interface Media {
   id: string;
   createdAt: string;
-  prompt?: string;
-  config: {
-    aspectRatio: '16:9' | '9:16';
-    personGeneration: 'dont_allow' | 'allow_adult';
-    durationSeconds: number;
-  };
+  prompt: string;
   mimeType: string;
   size: number;
-  filepath: string; // Path to the video file on disk
-  videoUrl?: string; // URL to the video (when autoDownload is false)
+  resourceUri: string;
 }
+export interface VideoOptions {
+  aspectRatio?: string;
+  durationSeconds?: number;
+  personGeneration?: string;
+  negativePrompt?: string;
+  resolution?: string;
+}
+const api = "https://generativelanguage.googleapis.com/v1beta";
+const idPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const extensions: Record<string, string> = {
+  "video/mp4": ".mp4",
+  "image/png": ".png",
+  "image/jpeg": ".jpg",
+  "image/webp": ".webp",
+};
 
-/**
- * Client for interacting with Google's Veo2 video generation API
- */
-export class VeoClient {
-  private client: GoogleGenAI;
-  private model: string = 'veo-2.0-generate-001';
-  private storageDir: string;
-  
-  /**
-   * Creates a new VeoClient instance
-   */
-  constructor() {
-    // Initialize the Google Gen AI client
-    this.client = new GoogleGenAI({ apiKey: appConfig.GOOGLE_API_KEY });
-    
-    // Set the storage directory
-    this.storageDir = appConfig.STORAGE_DIR;
-    
-    // Ensure the storage directory exists
-    this.ensureStorageDir().catch(err => {
-      log.fatal('Failed to create storage directory:', err);
-      process.exit(1);
-    });
+export function validateMedia(bytes: Buffer, mime: string): void {
+  const valid =
+    mime === "video/mp4"
+      ? bytes.subarray(4, 8).toString() === "ftyp"
+      : mime === "image/png"
+        ? bytes
+            .subarray(0, 8)
+            .equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+        : mime === "image/jpeg"
+          ? bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255
+          : mime === "image/webp"
+            ? bytes.subarray(0, 4).toString() === "RIFF" &&
+              bytes.subarray(8, 12).toString() === "WEBP"
+            : false;
+  if (!valid) throw new Error("Unsupported or invalid media bytes");
+}
+export async function boundedBody(
+  response: Response,
+  limit: number,
+  signal: AbortSignal,
+): Promise<Buffer> {
+  if (Number(response.headers.get("content-length")) > limit) {
+    await response.body?.cancel();
+    throw new Error("Media exceeds size limit");
   }
-  
-  /**
-   * Ensures the storage directory exists
-   */
-  private async ensureStorageDir(): Promise<void> {
-    try {
-      await fs.mkdir(this.storageDir, { recursive: true });
-    } catch (error) {
-      throw new Error(`Failed to create storage directory: ${error}`);
+  if (!response.body) throw new Error("Empty response");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    while (true) {
+      signal.throwIfAborted();
+      const { done, value } = await reader.read();
+      if (done) break;
+      length += value.length;
+      if (length > limit) throw new Error("Media exceeds size limit");
+      chunks.push(value);
     }
+    return Buffer.concat(chunks, length);
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
   }
-  
-  /**
-   * Processes an image input which can be base64 data, a file path, or a URL
-   * 
-   * @param image The image input (base64 data, file path, or URL)
-   * @param mimeType The MIME type of the image (optional, detected for files and URLs)
-   * @returns The image bytes and MIME type
-   */
-  private async processImageInput(
-    image: string,
-    mimeType?: string
-  ): Promise<{ imageBytes: string; mimeType: string }> {
-    // Check if the image is a URL
-    if (image.startsWith('http://') || image.startsWith('https://')) {
-      log.debug('Processing image from URL');
-      const response = await fetch(image);
-      if (!response.ok) {
-        throw new Error(`Failed to fetch image: ${response.status} ${response.statusText}`);
-      }
-      
-      const arrayBuffer = await response.arrayBuffer();
-      const buffer = Buffer.from(arrayBuffer);
-      
-      // Get the MIME type from the response or use a default
-      const responseMimeType = response.headers.get('content-type') || mimeType || 'image/jpeg';
-      
-      return {
-        imageBytes: buffer.toString('base64'),
-        mimeType: responseMimeType
-      };
-    }
-    
-    // Check if the image is a file path
-    if (image.startsWith('/') || image.includes(':\\') || image.includes(':/')) {
-      log.debug('Processing image from file path');
-      const buffer = await fs.readFile(image);
-      
-      // Determine MIME type from file extension if not provided
-      let detectedMimeType = mimeType;
-      if (!detectedMimeType) {
-        const extension = path.extname(image).toLowerCase();
-        switch (extension) {
-          case '.png':
-            detectedMimeType = 'image/png';
-            break;
-          case '.jpg':
-          case '.jpeg':
-            detectedMimeType = 'image/jpeg';
-            break;
-          case '.gif':
-            detectedMimeType = 'image/gif';
-            break;
-          case '.webp':
-            detectedMimeType = 'image/webp';
-            break;
-          default:
-            detectedMimeType = 'image/jpeg'; // Default
+}
+export class MediaStore {
+  constructor(readonly config: Config) {}
+  directory(kind: Kind) {
+    return kind === "videos"
+      ? this.config.storageDir
+      : path.join(this.config.storageDir, "images");
+  }
+  private clean(value: string): string {
+    return this.config.apiKey
+      ? value.split(this.config.apiKey).join("[redacted]")
+      : value;
+  }
+  async initialize() {
+    for (const kind of ["videos", "images"] as const) {
+      await fs.mkdir(this.directory(kind), { recursive: true, mode: 0o700 });
+      // Rewrite legacy metadata through an allowlist: discard key-bearing URLs,
+      // absolute paths and arbitrary fields. No media file is deleted or moved.
+      for (const file of await fs.readdir(this.directory(kind))) {
+        if (!file.endsWith(".json") || !idPattern.test(file.slice(0, -5)))
+          continue;
+        try {
+          const item = await this.metadata(kind, file.slice(0, -5));
+          await this.writeMetadata(kind, item);
+        } catch {
+          /* Invalid historical records are not exposed. */
         }
       }
-      
-      return {
-        imageBytes: buffer.toString('base64'),
-        mimeType: detectedMimeType
-      };
     }
-    
-    // Assume it's already base64 data
+  }
+  async writeMetadata(kind: Kind, item: Media) {
+    const target = path.join(this.directory(kind), item.id + ".json");
+    const temp = target + "." + randomUUID() + ".tmp";
+    try {
+      await fs.writeFile(temp, JSON.stringify(item), {
+        mode: 0o600,
+        flag: "wx",
+      });
+      await fs.rename(temp, target);
+    } finally {
+      await fs.unlink(temp).catch(() => {});
+    }
+  }
+  async metadata(kind: Kind, id: string): Promise<Media> {
+    if (!idPattern.test(id)) throw new Error("Invalid media ID");
+    const file = path.join(this.directory(kind), id + ".json");
+    const handle = await fs.open(file, "r");
+    let data;
+    try {
+      if ((await handle.stat()).size > 65536)
+        throw new Error("Invalid metadata");
+      try {
+        data = JSON.parse(await handle.readFile("utf8"));
+      } catch {
+        throw new Error("Invalid media metadata");
+      }
+    } finally {
+      await handle.close();
+    }
+    if (
+      data.id !== id ||
+      !extensions[data.mimeType] ||
+      !Number.isSafeInteger(data.size) ||
+      data.size < 0
+    )
+      throw new Error("Invalid metadata");
     return {
-      imageBytes: image,
-      mimeType: mimeType || 'image/png'
+      id,
+      createdAt: typeof data.createdAt === "string" ? data.createdAt : "",
+      prompt: this.clean(typeof data.prompt === "string" ? data.prompt : ""),
+      mimeType: data.mimeType,
+      size: data.size,
+      resourceUri: kind + "://" + id,
     };
   }
-  
-  /**
-   * Generates a video from a text prompt
-   * 
-   * @param prompt The text prompt for video generation
-   * @param config Optional configuration for video generation
-   * @param options Optional generation options
-   * @returns Metadata for the generated video and optionally the video data
-   */
-  async generateFromText(
-    prompt: string, 
-    config?: VideoConfig,
-    options?: VideoGenerationOptions
-  ): Promise<StoredVideoMetadata & { videoData?: string, videoUrl?: string }> {
+  async list(kind: Kind): Promise<Media[]> {
+    const items: Media[] = [];
+    for (const file of (await fs.readdir(this.directory(kind))).sort()) {
+      if (!file.endsWith(".json")) continue;
+      try {
+        items.push(await this.metadata(kind, file.slice(0, -5)));
+      } catch {
+        /* Skip malformed legacy records. */
+      }
+    }
+    return items;
+  }
+  async save(
+    kind: Kind,
+    bytes: Buffer,
+    mimeType: string,
+    prompt: string,
+  ): Promise<Media> {
+    if (bytes.length > this.config.maxMediaBytes)
+      throw new Error("Media exceeds size limit");
+    validateMedia(bytes, mimeType);
+    const id = randomUUID();
+    const item = {
+      id,
+      createdAt: new Date().toISOString(),
+      prompt: this.clean(prompt),
+      mimeType,
+      size: bytes.length,
+      resourceUri: kind + "://" + id,
+    };
+    const file = path.join(this.directory(kind), id + extensions[mimeType]);
+    await fs.writeFile(file, bytes, { flag: "wx", mode: 0o600 });
     try {
-      log.info('Generating video from text prompt');
-      log.verbose('Text prompt parameters:', JSON.stringify({ prompt, config, options }));
-      
-      // Default options
-      const autoDownload = options?.autoDownload !== false; // Default to true if not specified
-      const includeFullData = options?.includeFullData === true; // Default to false if not specified
-      
-      // Create generation config
-      const generateConfig: Record<string, any> = {};
-      
-      // Add optional parameters if provided
-      if (config?.aspectRatio) {
-        generateConfig.aspectRatio = config.aspectRatio;
-      }
-      
-      if (config?.personGeneration) {
-        generateConfig.personGeneration = config.personGeneration;
-      }
-      
-      if (config?.numberOfVideos) {
-        generateConfig.numberOfVideos = config.numberOfVideos;
-      }
-      
-      if (config?.durationSeconds) {
-        generateConfig.durationSeconds = config.durationSeconds;
-      }
-            
-      if (config?.negativePrompt) {
-        generateConfig.negativePrompt = config.negativePrompt;
-      }
-      
-      // Initialize request parameters
-      const requestParams = {
-        model: this.model,
-        prompt: prompt,
-        config: generateConfig
-      };
-      
-      // Call the generateVideos method
-      log.debug('Calling generateVideos API');
-      let operation = await this.client.models.generateVideos(requestParams);
-      
-      // Poll until the operation is complete
-      log.debug('Polling operation status');
-      while (!operation.done) {
-        log.verbose('Operation not complete, waiting...', JSON.stringify(operation));
-        // Wait for 5 seconds before checking again
-        await new Promise(resolve => setTimeout(resolve, 5000));
-        operation = await this.client.operations.getVideosOperation({
-          operation: operation
-        });
-      }
-      
-      log.debug('Video generation operation complete');
-      log.verbose('Operation result:', JSON.stringify(operation));
-      
-      // Check if we have generated videos
-      if (!operation.response?.generatedVideos || operation.response.generatedVideos.length === 0) {
-        throw new Error('No videos generated in the response');
-      }
-      
-      // Process each video
-      const videoPromises = operation.response.generatedVideos.map(async (generatedVideo, index) => {
-        if (!generatedVideo.video?.uri) {
-          log.warn('Generated video missing URI');
-          return null;
-        }
-        
-        // Append API key to the URI - use the imported config module
-        const videoUri = `${generatedVideo.video.uri}&key=${appConfig.GOOGLE_API_KEY}`;
-        log.debug(`Processing video ${index + 1} from URI`);
-        
-        // Generate a unique ID for the video
-        const id = index === 0 ? uuidv4() : `${uuidv4()}_${index}`;
-        
-        if (autoDownload) {
-          // Fetch the video
-          const response = await fetch(videoUri);
-          if (!response.ok) {
-            throw new Error(`Failed to fetch video: ${response.status} ${response.statusText}`);
-          }
-          
-          // Convert the response to a buffer
-          const arrayBuffer = await response.arrayBuffer();
-          const buffer = Buffer.from(arrayBuffer);
-          
-          // Save the video to disk
-          return this.saveVideoBuffer(buffer, prompt, config, id);
-        } else {
-          // Just return metadata with the URL
-          const metadata: StoredVideoMetadata = {
-            id,
-            createdAt: new Date().toISOString(),
-            prompt,
-            config: {
-              aspectRatio: config?.aspectRatio || '16:9',
-              personGeneration: config?.personGeneration || 'dont_allow',
-              durationSeconds: config?.durationSeconds || 5
-            },
-            mimeType: 'video/mp4',
-            size: 0, // Size unknown without downloading
-            filepath: '', // No filepath without downloading
-            videoUrl: videoUri // Include the video URL
-          };
-          
-          // Save the metadata
-          await this.saveMetadata(id, metadata);
-          
-          return metadata;
-        }
-      });
-      
-      // Wait for all videos to be processed
-      const metadataArray = await Promise.all(videoPromises);
-      
-      // Filter out any null values (from videos with missing URIs)
-      const validMetadata = metadataArray.filter(metadata => metadata !== null);
-      
-      if (validMetadata.length === 0) {
-        throw new Error('Failed to process any videos');
-      }
-      
-      // Return the first video's metadata
-      const result = validMetadata[0] as StoredVideoMetadata & { videoUrl?: string };
-      
-      // If we didn't download but have a URL, include it in the result
-      if (!autoDownload && result.videoUrl) {
-        return result;
-      }
-      
-      // If includeFullData is true and we downloaded the video, include the video data
-      if (includeFullData && autoDownload && result.filepath) {
-        const videoData = await fs.readFile(result.filepath);
-        return {
-          ...result,
-          videoData: videoData.toString('base64')
-        };
-      }
-      
-      return result;
+      await this.writeMetadata(kind, item);
     } catch (error) {
-      log.error('Error generating video from text:', error);
+      await fs.unlink(file);
       throw error;
     }
+    return item;
   }
-  
-  /**
-   * Generates a video from an image
-   * 
-   * @param image The image input (base64 data, file path, or URL)
-   * @param prompt Optional text prompt for video generation
-   * @param config Optional configuration for video generation
-   * @param options Optional generation options
-   * @param mimeType The MIME type of the image (optional, detected for files and URLs)
-   * @returns Metadata for the generated video and optionally the video data
-   */
-  async generateFromImage(
-    image: string,
-    prompt?: string,
-    config?: VideoConfig,
-    options?: VideoGenerationOptions,
-    mimeType?: string
-  ): Promise<StoredVideoMetadata & { videoData?: string, videoUrl?: string }> {
-    try {
-      log.info('Generating video from image');
-      log.verbose('Image prompt parameters:', JSON.stringify({ prompt, config, options, mimeType }));
-      
-      // Default options
-      const autoDownload = options?.autoDownload !== false; // Default to true if not specified
-      const includeFullData = options?.includeFullData === true; // Default to false if not specified
-      
-      // Default prompt
-      prompt = prompt || 'Generate a video from this image';
-      
-      // Create generation config
-      const generateConfig: Record<string, any> = {};
-      
-      // Add optional parameters if provided
-      if (config?.aspectRatio) {
-        generateConfig.aspectRatio = config.aspectRatio;
-      }
-      
-      // Note: personGeneration is not allowed for image-to-video generation
-      
-      if (config?.numberOfVideos) {
-        generateConfig.numberOfVideos = config.numberOfVideos;
-      }
-      
-      if (config?.durationSeconds) {
-        generateConfig.durationSeconds = config.durationSeconds;
-      }
-            
-      if (config?.negativePrompt) {
-        generateConfig.negativePrompt = config.negativePrompt;
-      }
-      
-      // Process the image input
-      const { imageBytes, mimeType: detectedMimeType } = await this.processImageInput(image, mimeType);
-      
-      // Initialize request parameters with the image
-      const requestParams = {
-        model: this.model,
-        prompt: prompt || 'Generate a video from this image',
-        image: {
-          imageBytes: imageBytes,
-          mimeType: detectedMimeType
-        },
-        config: generateConfig
-      };
-      
-      // Call the generateVideos method
-      log.debug('Calling generateVideos API with image');
-      let operation = await this.client.models.generateVideos(requestParams);
-      
-      // Poll until the operation is complete
-      log.debug('Polling operation status');
-      while (!operation.done) {
-        log.verbose('Operation not complete, waiting...', JSON.stringify(operation));
-        // Wait for 5 seconds before checking again
-        await new Promise(resolve => setTimeout(resolve, 5000));
-        operation = await this.client.operations.getVideosOperation({
-          operation: operation
-        });
-      }
-      
-      log.debug('Video generation operation complete');
-      log.verbose('Operation result:', JSON.stringify(operation));
-      
-      // Check if we have generated videos
-      if (!operation.response?.generatedVideos || operation.response.generatedVideos.length === 0) {
-        throw new Error('No videos generated in the response');
-      }
-      
-      // Process each video
-      const videoPromises = operation.response.generatedVideos.map(async (generatedVideo, index) => {
-        if (!generatedVideo.video?.uri) {
-          log.warn('Generated video missing URI');
-          return null;
-        }
-        
-        // Append API key to the URI - use the imported config module
-        const videoUri = `${generatedVideo.video.uri}&key=${appConfig.GOOGLE_API_KEY}`;
-        log.debug(`Processing video ${index + 1} from URI`);
-        
-        // Generate a unique ID for the video
-        const id = index === 0 ? uuidv4() : `${uuidv4()}_${index}`;
-        
-        if (autoDownload) {
-          // Fetch the video
-          const response = await fetch(videoUri);
-          if (!response.ok) {
-            throw new Error(`Failed to fetch video: ${response.status} ${response.statusText}`);
-          }
-          
-          // Convert the response to a buffer
-          const arrayBuffer = await response.arrayBuffer();
-          const buffer = Buffer.from(arrayBuffer);
-          
-          // Save the video to disk
-          return this.saveVideoBuffer(buffer, prompt, config, id);
-        } else {
-          // Just return metadata with the URL
-          const metadata: StoredVideoMetadata = {
-            id,
-            createdAt: new Date().toISOString(),
-            prompt,
-            config: {
-              aspectRatio: config?.aspectRatio || '16:9',
-              personGeneration: config?.personGeneration || 'dont_allow',
-              durationSeconds: config?.durationSeconds || 5
-            },
-            mimeType: 'video/mp4',
-            size: 0, // Size unknown without downloading
-            filepath: '', // No filepath without downloading
-            videoUrl: videoUri // Include the video URL
-          };
-          
-          // Save the metadata
-          await this.saveMetadata(id, metadata);
-          
-          return metadata;
-        }
-      });
-      
-      // Wait for all videos to be processed
-      const metadataArray = await Promise.all(videoPromises);
-      
-      // Filter out any null values (from videos with missing URIs)
-      const validMetadata = metadataArray.filter(metadata => metadata !== null);
-      
-      if (validMetadata.length === 0) {
-        throw new Error('Failed to process any videos');
-      }
-      
-      // Return the first video's metadata
-      const result = validMetadata[0] as StoredVideoMetadata & { videoUrl?: string };
-      
-      // If we didn't download but have a URL, include it in the result
-      if (!autoDownload && result.videoUrl) {
-        return result;
-      }
-      
-      // If includeFullData is true and we downloaded the video, include the video data
-      if (includeFullData && autoDownload && result.filepath) {
-        const videoData = await fs.readFile(result.filepath);
-        return {
-          ...result,
-          videoData: videoData.toString('base64')
-        };
-      }
-      
-      return result;
-    } catch (error) {
-      log.error('Error generating video from image:', error);
-      throw error;
-    }
-  }
-  
-  /**
-   * Saves a video buffer to disk
-   * 
-   * @param videoBuffer The video buffer to save
-   * @param prompt The prompt used for generation
-   * @param config The configuration used for generation
-   * @param id The ID to use for the video
-   * @returns Metadata for the saved video
-   */
-  private async saveVideoBuffer(
-    videoBuffer: Buffer,
-    prompt?: string,
-    config?: VideoConfig,
-    id: string = uuidv4()
-  ): Promise<StoredVideoMetadata> {
-    try {
-      log.debug(`Saving video with ID: ${id}`);
-      
-      // Determine the file extension based on MIME type
-      const mimeType = 'video/mp4'; // Assuming Veo2 returns MP4 videos
-      const extension = '.mp4';
-      
-      // Create the file path (using absolute path)
-      const filePath = path.resolve(this.storageDir, `${id}${extension}`);
-      
-      // Save the video to disk
-      await fs.writeFile(filePath, videoBuffer);
-      
-      // Create and return the metadata
-      const metadata: StoredVideoMetadata = {
-        id,
-        createdAt: new Date().toISOString(),
-        prompt,
-        config: {
-          aspectRatio: config?.aspectRatio || '16:9',
-          personGeneration: config?.personGeneration || 'dont_allow',
-          durationSeconds: config?.durationSeconds || 5
-        },
-        mimeType,
-        size: videoBuffer.length,
-        filepath: filePath
-      };
-      
-      // Save the metadata
-      await this.saveMetadata(id, metadata);
-      
-      log.info(`Video saved successfully with ID: ${id}`);
-      return metadata;
-    } catch (error) {
-      log.error(`Error saving video buffer: ${error}`);
-      throw error;
-    }
-  }
-  
-  /**
-   * Saves video metadata to disk
-   * 
-   * @param id The video ID
-   * @param metadata The video metadata
-   */
-  private async saveMetadata(id: string, metadata: StoredVideoMetadata): Promise<void> {
-    const metadataPath = path.resolve(this.storageDir, `${id}.json`);
-    await fs.writeFile(metadataPath, JSON.stringify(metadata, null, 2));
-  }
-  
-  /**
-   * Gets a video by ID
-   * 
-   * @param id The video ID
-   * @param options Optional options for getting the video
-   * @returns The video data and metadata
-   */
-  async getVideo(
+  async bytes(
+    kind: Kind,
     id: string,
-    options?: { includeFullData?: boolean }
-  ): Promise<{ data?: Buffer; metadata: StoredVideoMetadata; videoData?: string }> {
+    limit = this.config.maxMediaBytes,
+  ): Promise<{ item: Media; bytes: Buffer }> {
+    const item = await this.metadata(kind, id);
+    const file = path.join(
+      this.directory(kind),
+      id + extensions[item.mimeType],
+    );
+    const handle = await fs.open(file, "r");
+    let bytes: Buffer;
     try {
-      // Get the metadata
-      const metadata = await this.getMetadata(id);
-      
-      // Default options
-      const includeFullData = options?.includeFullData === true; // Default to false if not specified
-      
-      // If includeFullData is false, just return the metadata
-      if (!includeFullData) {
-        return { metadata };
-      }
-      
-      // Get the video data - use the filepath from metadata if available
-      let filePath: string;
-      if (metadata.filepath) {
-        filePath = metadata.filepath;
-      } else {
-        // Fallback to constructing the path
-        const extension = metadata.mimeType === 'video/mp4' ? '.mp4' : '.webm';
-        filePath = path.resolve(this.storageDir, `${id}${extension}`);
-        
-        // Update the metadata with the filepath
-        metadata.filepath = filePath;
-        await this.saveMetadata(id, metadata);
-      }
-      
-      const data = await fs.readFile(filePath);
-      
-      // If includeFullData is true, include the base64 data
-      if (includeFullData) {
-        return { 
-          metadata, 
-          data,
-          videoData: data.toString('base64')
-        };
-      }
-      
-      return { data, metadata };
-    } catch (error) {
-      log.error(`Error getting video ${id}:`, error);
-      throw new Error(`Video not found: ${id}`);
+      if ((await handle.stat()).size > limit)
+        throw new Error(
+          "Media exceeds inline size limit; use a smaller generation",
+        );
+      bytes = await handle.readFile();
+    } finally {
+      await handle.close();
     }
-  }
-  
-  /**
-   * Gets video metadata by ID
-   * 
-   * @param id The video ID
-   * @returns The video metadata
-   */
-  async getMetadata(id: string): Promise<StoredVideoMetadata> {
-    try {
-      const metadataPath = path.resolve(this.storageDir, `${id}.json`);
-      const metadataJson = await fs.readFile(metadataPath, 'utf-8');
-      return JSON.parse(metadataJson) as StoredVideoMetadata;
-    } catch (error) {
-      log.error(`Error getting metadata for video ${id}:`, error);
-      throw new Error(`Video metadata not found: ${id}`);
-    }
-  }
-  
-  /**
-   * Lists all generated videos
-   * 
-   * @returns Array of video metadata
-   */
-  async listVideos(): Promise<StoredVideoMetadata[]> {
-    try {
-      // Get all files in the storage directory
-      const files = await fs.readdir(this.storageDir);
-      
-      // Filter for JSON metadata files
-      const metadataFiles = files.filter(file => file.endsWith('.json'));
-      
-      // Read and parse each metadata file
-      const metadataPromises = metadataFiles.map(async file => {
-        const filePath = path.resolve(this.storageDir, file);
-        const metadataJson = await fs.readFile(filePath, 'utf-8');
-        return JSON.parse(metadataJson) as StoredVideoMetadata;
-      });
-      
-      // Wait for all metadata to be read
-      return Promise.all(metadataPromises);
-    } catch (error) {
-      log.error('Error listing videos:', error);
-      return [];
-    }
+    validateMedia(bytes, item.mimeType);
+    return { item, bytes };
   }
 }
-
-// Export a singleton instance
-export const veoClient = new VeoClient();
+export class VeoClient {
+  constructor(
+    readonly config: Config,
+    readonly store: MediaStore,
+    readonly fetcher: typeof fetch = fetch,
+  ) {}
+  async request(
+    url: string,
+    signal: AbortSignal,
+    body?: unknown,
+  ): Promise<any> {
+    if (!this.config.apiKey)
+      throw new Error("GOOGLE_API_KEY is required for generation");
+    const response = await this.fetcher(url, {
+      method: body === undefined ? "GET" : "POST",
+      redirect: "error",
+      headers: {
+        "x-goog-api-key": this.config.apiKey,
+        "content-type": "application/json",
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal,
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new Error(
+        "Google API request failed (HTTP " +
+          response.status +
+          "); check model access, quota and billing",
+      );
+    }
+    const bytes = await boundedBody(
+      response,
+      this.config.maxMediaBytes * 2,
+      signal,
+    );
+    try {
+      return JSON.parse(bytes.toString());
+    } catch {
+      throw new Error("Invalid Google API response");
+    }
+  }
+  async download(
+    rawUrl: string,
+    signal: AbortSignal,
+    provider = true,
+  ): Promise<Buffer> {
+    let url = new URL(rawUrl);
+    for (let redirects = 0; redirects <= 3; redirects++) {
+      const host = url.hostname;
+      const trusted = provider
+        ? host === "generativelanguage.googleapis.com" ||
+          host === "storage.googleapis.com" ||
+          host.endsWith(".googleusercontent.com")
+        : this.config.imageUrlHosts.includes(host);
+      if (
+        url.protocol !== "https:" ||
+        url.username ||
+        url.password ||
+        (url.port && url.port !== "443") ||
+        !trusted
+      )
+        throw new Error("Media URL host is not allowed");
+      for (const key of [...url.searchParams.keys()])
+        if (/^(key|api_key|apikey)$/i.test(key)) url.searchParams.delete(key);
+      const headers: Record<string, string> = {};
+      if (provider && host === "generativelanguage.googleapis.com")
+        headers["x-goog-api-key"] = this.config.apiKey;
+      const response = await this.fetcher(url, {
+        headers,
+        signal,
+        redirect: "manual",
+      });
+      if ([301, 302, 303, 307, 308].includes(response.status)) {
+        await response.body?.cancel();
+        const next = response.headers.get("location");
+        if (!next) throw new Error("Invalid media redirect");
+        url = new URL(next, url);
+        continue;
+      }
+      if (!response.ok) {
+        await response.body?.cancel();
+        throw new Error("Media download failed (HTTP " + response.status + ")");
+      }
+      return boundedBody(response, this.config.maxMediaBytes, signal);
+    }
+    throw new Error("Too many media redirects");
+  }
+  async imageInput(
+    input: string | { data: string; mimeType: string },
+    signal: AbortSignal,
+  ) {
+    let bytes: Buffer;
+    let mimeType = typeof input === "string" ? "image/png" : input.mimeType;
+    const value = typeof input === "string" ? input : input.data;
+    if (/^https?:/.test(value)) {
+      bytes = await this.download(value, signal, false);
+      mimeType =
+        bytes[0] === 255
+          ? "image/jpeg"
+          : bytes.subarray(0, 4).toString() === "RIFF"
+            ? "image/webp"
+            : "image/png";
+    } else if (
+      typeof input === "string" &&
+      (path.isAbsolute(value) || value.startsWith("./"))
+    ) {
+      const root = await fs.realpath(this.config.imageInputDir);
+      const file = await fs.realpath(path.resolve(value));
+      if (
+        path.relative(root, file).startsWith("..") ||
+        path.isAbsolute(path.relative(root, file))
+      )
+        throw new Error("Image file is outside IMAGE_INPUT_DIR");
+      const handle = await fs.open(file, "r");
+      try {
+        if ((await handle.stat()).size > 10 * 1024 * 1024)
+          throw new Error("Input image exceeds 10 MiB");
+        bytes = await handle.readFile();
+      } finally {
+        await handle.close();
+      }
+      mimeType =
+        bytes[0] === 255
+          ? "image/jpeg"
+          : bytes.subarray(0, 4).toString() === "RIFF"
+            ? "image/webp"
+            : "image/png";
+    } else {
+      if (
+        value.length > 14 * 1024 * 1024 ||
+        !/^[a-zA-Z0-9+/]*={0,2}$/.test(value) ||
+        value.length % 4
+      )
+        throw new Error("Invalid base64 image");
+      bytes = Buffer.from(value, "base64");
+    }
+    if (bytes.length > 10 * 1024 * 1024)
+      throw new Error("Input image exceeds 10 MiB");
+    validateMedia(bytes, mimeType);
+    return { bytesBase64Encoded: bytes.toString("base64"), mimeType };
+  }
+  async generateVideo(
+    prompt: string,
+    options: VideoOptions,
+    signal: AbortSignal,
+    input?: string | { data: string; mimeType: string },
+  ): Promise<Media> {
+    const image =
+      input === undefined ? undefined : await this.imageInput(input, signal);
+    const instance = { prompt, ...(image ? { image } : {}) };
+    let operation = await this.request(
+      api + "/models/" + this.config.videoModel + ":predictLongRunning",
+      signal,
+      {
+        instances: [instance],
+        parameters: {
+          sampleCount: 1,
+          aspectRatio: options.aspectRatio ?? "16:9",
+          durationSeconds: options.durationSeconds ?? 8,
+          personGeneration:
+            options.personGeneration ?? (image ? "allow_adult" : "allow_all"),
+          ...(options.negativePrompt
+            ? { negativePrompt: options.negativePrompt }
+            : {}),
+          resolution: options.resolution ?? "720p",
+        },
+      },
+    );
+    while (!operation.done) {
+      if (
+        typeof operation.name !== "string" ||
+        !/^(models\/[a-zA-Z0-9._-]+\/)?operations\/[a-zA-Z0-9._-]+$/.test(
+          operation.name,
+        )
+      )
+        throw new Error("Invalid Google operation identifier");
+      await delay(this.config.pollMs, undefined, { signal });
+      operation = await this.request(api + "/" + operation.name, signal);
+    }
+    if (operation.error)
+      throw new Error(
+        "Google video generation failed; check provider safety and quota settings",
+      );
+    const uri =
+      operation.response?.generateVideoResponse?.generatedSamples?.[0]?.video
+        ?.uri;
+    if (typeof uri !== "string")
+      throw new Error(
+        "Google returned no video; generation may have been filtered",
+      );
+    const bytes = await this.download(uri, signal);
+    return this.store.save("videos", bytes, "video/mp4", prompt);
+  }
+  async generateImage(prompt: string, signal: AbortSignal): Promise<Media> {
+    // generateContent remains supported; no provider-side conversation is stored.
+    const result = await this.request(
+      api + "/models/" + this.config.imageModel + ":generateContent",
+      signal,
+      {
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { responseModalities: ["IMAGE"] },
+      },
+    );
+    const part = result.candidates
+      ?.flatMap((c: any) => c.content?.parts ?? [])
+      .find((p: any) => p.inlineData)?.inlineData;
+    if (typeof part?.data !== "string" || typeof part?.mimeType !== "string")
+      throw new Error(
+        "Google returned no image; generation may have been filtered",
+      );
+    if (!/^[a-zA-Z0-9+/]*={0,2}$/.test(part.data))
+      throw new Error("Invalid generated image");
+    return this.store.save(
+      "images",
+      Buffer.from(part.data, "base64"),
+      part.mimeType,
+      prompt,
+    );
+  }
+}

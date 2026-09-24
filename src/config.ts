@@ -1,55 +1,67 @@
-import dotenv from 'dotenv';
-import { z } from 'zod';
-import { log } from './utils/logger.js';
+import dotenv from "dotenv";
+import path from "node:path";
+dotenv.config({ quiet: true });
 
-// Load environment variables from .env file
-dotenv.config();
-
-// Define log levels
-export type LogLevel = 'verbose' | 'debug' | 'info' | 'warn' | 'error' | 'fatal' | 'none';
-
-// Define schema for environment variables
-const ConfigSchema = z.object({
-  // Google API Key for Gemini/Veo2
-  GOOGLE_API_KEY: z.string().min(1),
-  
-  // Server configuration (optional with default)
-  PORT: z.string().transform(Number).default('3000'),
-  
-  // Storage directory for generated videos (optional with default)
-  STORAGE_DIR: z.string().default('./generated-videos'),
-  
-  // Logging level (optional with default to 'fatal')
-  LOG_LEVEL: z.enum(['verbose', 'debug', 'info', 'warn', 'error', 'fatal', 'none']).default('fatal'),
-});
-
-// Parse and validate environment variables
-const parseConfig = () => {
-  try {
-    return ConfigSchema.parse(process.env);
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      const missingVars = error.errors
-        .filter(e => e.code === 'invalid_type' && e.received === 'undefined')
-        .map(e => e.path.join('.'));
-      
-      if (missingVars.length > 0) {
-        log.fatal(`❌ Missing required environment variables: ${missingVars.join(', ')}`);
-        log.fatal('Please check your .env file or environment configuration.');
-      } else {
-        log.fatal('❌ Invalid environment variables:', error.errors);
-      }
-    } else {
-      log.fatal('❌ Error parsing configuration:', error);
-    }
-    process.exit(1);
-  }
+export interface Config {
+  apiKey: string;
+  port: number;
+  host: string;
+  storageDir: string;
+  videoModel: string;
+  imageModel: string;
+  authToken: string;
+  allowedHosts: string[];
+  allowedOrigins: string[];
+  imageUrlHosts: string[];
+  imageInputDir: string;
+  deadlineMs: number;
+  pollMs: number;
+  maxMediaBytes: number;
+}
+const integer = (
+  value: string | undefined,
+  fallback: number,
+  min: number,
+  max: number,
+) => {
+  const n = value === undefined ? fallback : Number(value);
+  if (!Number.isInteger(n) || n < min || n > max)
+    throw new Error("Invalid numeric configuration");
+  return n;
 };
-
-// Parse and export the validated config
-const config = parseConfig();
-
-// Initialize the logger with the configured log level
-log.initialize(config.LOG_LEVEL);
-
-export default config;
+const list = (v?: string) =>
+  (v ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+  const storageDir = path.resolve(env.STORAGE_DIR ?? "./generated-videos");
+  const model = (v: string) => {
+    if (!/^[a-zA-Z0-9._-]{1,100}$/.test(v))
+      throw new Error("Invalid model identifier");
+    return v;
+  };
+  return {
+    apiKey: env.GOOGLE_API_KEY ?? env.GEMINI_API_KEY ?? "",
+    port: integer(env.PORT, 3000, 0, 65535),
+    host: env.HOST ?? "127.0.0.1",
+    storageDir,
+    videoModel: model(env.VIDEO_MODEL ?? "veo-3.1-generate-preview"),
+    imageModel: model(env.IMAGE_MODEL ?? "gemini-3.1-flash-image"),
+    authToken: env.MCP_AUTH_TOKEN ?? "",
+    allowedHosts: list(env.ALLOWED_HOSTS),
+    allowedOrigins: list(env.ALLOWED_ORIGINS),
+    imageUrlHosts: list(env.IMAGE_URL_HOSTS),
+    imageInputDir: path.resolve(
+      env.IMAGE_INPUT_DIR ?? path.join(storageDir, "images"),
+    ),
+    deadlineMs: integer(env.GENERATION_TIMEOUT_MS, 600000, 1000, 1800000),
+    pollMs: integer(env.POLL_INTERVAL_MS, 10000, 10, 60000),
+    maxMediaBytes: integer(
+      env.MAX_MEDIA_BYTES,
+      64 * 1024 * 1024,
+      1024,
+      128 * 1024 * 1024,
+    ),
+  };
+}
